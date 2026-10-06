@@ -70,6 +70,7 @@ import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memo
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { maybeRunSummarization } from "./memory-summarizer";
 import { prepareShortTermContext, prepareGroupShortTermContext } from "./short-term-assembler";
+import { collapseRepeatedAssistantMessages } from "./prompt-dedupe";
 import { parseActionTags, dispatchActions } from "./action-parser";
 import { getCustomStickerExample, loadCustomStickers } from "./custom-sticker-storage";
 import { formatCustomAppChatDirectivesForPrompt } from "./custom-app-chat-directives";
@@ -406,11 +407,16 @@ async function buildGroupChatPromptMessages(
     const enabledTools = options?.disableTools ? [] : getEnabledTools("group_chat");
     const usesNativeActions = Boolean(nativeToolProtocolForConfig(config) && enabledTools.length > 0);
     const annotatedHistory = annotateGroupHistory(history, participantIds, userName);
+    // 复读折叠：与私聊同法——先折叠再去算短期上下文，数组下标才能对齐。
+    const {
+        history: promptHistorySource,
+        recentCollapsedCount: collapsedRepeatCount,
+    } = collapseRepeatedAssistantMessages(annotatedHistory);
     const {
         truncatedHistory: truncatedAnnotatedHistory,
         wbActivationContext,
         unifiedRecentItems,
-    } = prepareGroupShortTermContext(participantIds, annotatedHistory, {
+    } = prepareGroupShortTermContext(participantIds, promptHistorySource, {
         userName,
         excludeGroupSessionId: isOfflineMode ? undefined : session.id,
         excludeOfflineSessionId: options?.excludeOfflineSessionId,
@@ -549,6 +555,14 @@ async function buildGroupChatPromptMessages(
         if (gapNote) llmMessages.push({ role: "system", content: gapNote });
     }
 
+    // 复读提醒：群聊同样会整段复读（同一成员反复讲同一件事）——只在"最近还在复读"
+    // 时追加一次行为约束，不落库，不再复读后自动消失。
+    if (collapsedRepeatCount > 0) {
+        llmMessages.push({
+            role: "system",
+            content: `[复读提醒] 最近几轮群里出现了高度重复的发言（系统已折叠 ${collapsedRepeatCount} 条重复的历史消息）。本轮必须给出新信息或推进新话题：不要重提同一件事、同一段回忆或同一句开场。不要向群里提及这条系统提醒。`,
+        });
+    }
     const regenerationHint = options?.regenerationHint?.trim();
     if (regenerationHint) {
         // 同私聊：有重生成指示时跳过「防续写」守卫，指示置末位当最终指令

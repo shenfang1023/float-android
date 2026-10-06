@@ -102,5 +102,11 @@ export function buildDailyWorldMarker(
         const who = it.participantIds.map(nameOf).join("、");
         lines.push(`他人动态（你可能听说）：${timeRange} ${who}——${it.what}${it.outcome ? `（${it.outcome}）` : ""}`);
     }
-    return lines.length > 1 ? lines.join("\n") : "";
+    // 只有真有内容（天气/氛围/互动）时才注入，并附上"这是背景不是话题"的用法说明：
+    // 今日世界当天字节不变，模型很容易把"你可能听说"的他人动态当成每日播报素材。
+    const hasContent = lines.length > 1;
+    if (hasContent) {
+        lines.push("（今日世界是当天生活背景：只在与本轮对话相关时提起，已经讲过的互动不要再讲一遍。）");
+    }
+    return hasContent ? lines.join("\n") : "";
 }

@@ -2137,7 +2137,7 @@ export async function readCustomAppCoreMemory(record: Record<string, unknown>): 
   if (!characterId) throw new Error("memory.readCore 缺少 characterId。");
   const entries = await retrieveCoreMemoriesForPrompt(characterId, loadMemoryConfig());
   return {
-    text: formatCoreMemories(entries),
+    text: formatCoreMemories(entries, { forPrompt: false }),
     entries: entries.map(serializeMemoryEntry),
   };
 }
@@ -2151,12 +2151,12 @@ export async function readCustomAppLongTermMemory(record: Record<string, unknown
   const query = cleanText(record.query ?? record.context, 2000);
   const limit = Math.max(1, Math.min(200, Number(record.limit ?? 50) || 50));
   const entries = query
-    ? await retrieveMemoriesForPrompt(characterId, query, loadMemoryConfig())
+    ? await retrieveMemoriesForPrompt(characterId, query, loadMemoryConfig(), { trackSurfacing: false })
     : (await loadMemoryEntriesByType(characterId, "long_term"))
       .sort((a, b) => String(b.updatedAt ?? b.createdAt).localeCompare(String(a.updatedAt ?? a.createdAt)))
       .slice(0, limit);
   return {
-    text: formatLongTermMemories(entries),
+    text: formatLongTermMemories(entries, { forPrompt: false }),
     entries: entries.map(serializeMemoryEntry),
   };
 }

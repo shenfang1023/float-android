@@ -27,6 +27,8 @@ export type MemoryEntry = {
     salience?: number;
     /** derivedFrom：本条目由哪些条目支撑（episode→summary、reflection→证据） */
     links?: string[];
+    /** 召回新鲜度用不上这里——注入记账存在 kv（见 MemorySurfacedRecord），
+     *  不写进记忆记录，避免每次生成整条覆盖。 */
 };
 
 export function memoryKindOf(entry: Pick<MemoryEntry, "kind">): MemoryKind {
@@ -40,6 +42,19 @@ export function effectiveSalience(entry: Pick<MemoryEntry, "salience" | "importa
     return Math.min(10, Math.max(1, Math.round(raw)));
 }
 
+
+/**
+ * 注入记账条目：长期记忆被注入提示词的累计次数与最近时间。
+ *
+ * 记账**不写进记忆记录本身**（那会让每次生成整条覆盖刷新，重写 embedding 大字段，
+ * 还有覆盖并发编辑/复活已删除条目的风险），而是按 id 存在 kv 里的小记录中。
+ */
+export type MemorySurfacedRecord = {
+    /** 被注入过的次数 */
+    count: number;
+    /** 最近一次被注入的时间（ISO）；空串 = 从未提起 */
+    at: string;
+};
 export type MemoryConfig = {
     autoSummarizeEnabled: boolean;          // whether auto-summarization runs after N events
     autoBuildCoreEnabled: boolean;          // whether core memories rebuild after long-term summarization
@@ -50,6 +65,10 @@ export type MemoryConfig = {
     shortTermTokenBudget: number;           // token limit for short-term event log
     coreMemoryTokenBudget: number;          // token limit for injected core memories
     longTermTokenBudget: number;            // token limit for injected long-term memories
+    /** 配置自身的结构版本：注入预算是按"版本"迁移的，不看值相等。
+     *  旧版本存的配置没有这个字段（含备份还原回来的），下一次读取会被迁移并回写；
+     *  应用自己写过的配置一定带当前版本号，所以用户手调的值永不被迁移覆盖。 */
+    budgetSchemaVersion?: number;
     summarizationPrompt: string;            // user-editable prompt template for memory summarization
     coreMemoryPrompt: string;               // user-editable prompt template for core-memory extraction
     vnSummaryPrompt: string;                // user-editable prompt for VN chapter summarization
@@ -69,6 +88,9 @@ export type MemoryConfig = {
         custom_app?: boolean;
     };
 };
+
+/** 注入预算的配置结构版本（loadMemoryConfig 按它决定是否需要一次性迁移）。 */
+export const MEMORY_BUDGET_SCHEMA_VERSION = 1;
 
 export type MemorySearchResult = {
     entry: MemoryEntry;
@@ -156,6 +178,26 @@ export const DEFAULT_CORE_MEMORY_PROMPT = `你是一个核心记忆整理助手�
 
 核心记忆总结：`;
 
+/**
+ * 注入预算默认值。
+ *
+ * 历史教训：这三个值曾经都是 100000 —— 等于"不设限"。后果是记忆召回里
+ * "总量没超预算就全量返回"的捷径永远成立，相关性/新鲜度排序全部作废，
+ * 同一个角色每轮拿到的是同一坨陈年旧事，于是变成"每天都重复说同样的话"。
+ * 默认值必须收敛到"真实能被讲完"的量级，排序才有意义。
+ *
+ * （短期预算只影响提示词里的近期上下文池，不影响记忆总结的取材范围：
+ *   总结走 memory-summarizer 的时间水位线，跟这个预算无关。）
+ */
+export const DEFAULT_MEMORY_BUDGET = {
+    shortTermTokenBudget: 16000,
+    coreMemoryTokenBudget: 1200,
+    longTermTokenBudget: 3000,
+} as const;
+
+/** 旧的"不限量"默认值：一次性迁移时用来识别从未被用户调整过的存量配置。 */
+export const LEGACY_UNBOUNDED_MEMORY_BUDGET = 100000;
+
 export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
     autoSummarizeEnabled: true,
     autoBuildCoreEnabled: true,
@@ -163,9 +205,9 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
     maxLongTermEntries: 500,
     summarizationEventInterval: 80,
     coreSummarizationInterval: 5,
-    shortTermTokenBudget: 100000,
-    coreMemoryTokenBudget: 100000,
-    longTermTokenBudget: 100000,
+    shortTermTokenBudget: DEFAULT_MEMORY_BUDGET.shortTermTokenBudget,
+    coreMemoryTokenBudget: DEFAULT_MEMORY_BUDGET.coreMemoryTokenBudget,
+    longTermTokenBudget: DEFAULT_MEMORY_BUDGET.longTermTokenBudget,
     summarizationPrompt: DEFAULT_SUMMARIZATION_PROMPT_V2,
     coreMemoryPrompt: DEFAULT_CORE_MEMORY_PROMPT,
     vnSummaryPrompt: "",

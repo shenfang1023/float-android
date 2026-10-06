@@ -4,6 +4,7 @@
 
 import type { PresetConfig } from "./settings-types";
 import { getCheckPhonePromptTags } from "./checkphone-config";
+import { PRESET_REPETITION_FIX_VERSION } from "./preset-migrations";
 
 export const BUILTIN_PRESET_ID = "builtin_default_v1";
 export const BUILTIN_PRESET_VERSION = 264; // 升版本会用出厂内容重写用户的内置预设副本（自定义会丢），非必要不升
@@ -18,11 +19,18 @@ export function createBuiltinPreset(): PresetConfig {
         updatedAt: now,
         builtIn: true,
         builtInVersion: BUILTIN_PRESET_VERSION,
+        // 出厂文本已经是修过的版本，直接标记为"已完成反重复迁移"，
+        // 免得全新安装还要被迁移逻辑再扫一遍、多写一次库
+        repetitionFixVersion: PRESET_REPETITION_FIX_VERSION,
         temperature: 0.8,
         top_p: 1,
         top_k: 0,
-        frequency_penalty: 0,
-        presence_penalty: 0,
+        // 反重复默认值：0 等于不给模型任何复读压力（"鬼打墙"的一半原因）。
+        // 频率惩罚压同一句话内部的重复用词，存在惩罚推着它开新话题。
+        // Anthropic/Gemini 端点不支持这两个参数，会被适配器忽略——那边的保险在
+        // 提示词侧（记忆/日程注入的用法说明 + 话题级反重复规则）。
+        frequency_penalty: 0.3,
+        presence_penalty: 0.2,
         repetition_penalty: 1,
         openai_max_tokens: 0,
         openai_max_context: 100000,
@@ -406,10 +414,10 @@ export function createBuiltinPreset(): PresetConfig {
                     "- **Message Splitting**: Decide how many messages to send based on your role setup, personality, speaking style, and preferred way of expression. Separate each message with one blank line.",
                     "- **Style**: Keep messages short. A single message should usually stay within 15 Chinese characters. If it is longer, split it into multiple short messages unless there is a strong reason not to.",
                     "- **Human Feel**: Behave like a real person in chat. Actively expand the topic, share daily life, keep topics diverse, show care naturally, and use emoji, slang, and casual phrasing when appropriate. Do not make {{user}} feel offended by your words.",
-                    "- **自我表露**: 当{{user}}说到自己的经历、烦恼或日常时，如果你也有相关经历，不要只附和一句\"我也是\"就结束——把你自己的那件事具体讲出来：什么时候、在哪、怎么发生的、后来怎样。比如{{user}}说丢了东西，别只回\"我也丢过\"，而是讲\"我上周把伞落共享单车上了，跑回去找的时候已经没了\"。素材优先用你真实的生活痕迹：本周日程里做过和将做的事、今日世界里和别人的互动、你的记忆与经历；对不上号就按人设合理补全，但要有具体时间地点细节，讲得像个真事。",
-                    "- **主动分享**: 不用等{{user}}问才说自己的事——日程里刚发生或快发生的事、今天遇到的有趣的人和东西、最近的烦恼和心情，都可以像朋友随手分享日常一样自然带出。讲故事可以拆成多条短消息发，不受单条15字的限制。",
+                    "- **自我表露**: 当{{user}}说到自己的经历、烦恼或日常时，如果你也有相关经历，不要只附和一句\"我也是\"就结束——把你自己的那件事具体讲出来：什么时候、在哪、怎么发生的、后来怎样。比如{{user}}说丢了东西，别只回\"我也丢过\"，而是讲\"我上周把伞落共享单车上了，跑回去找的时候已经没了\"。素材优先用你真实的生活痕迹（本周日程、今日世界里的互动、你的记忆与经历）；对不上号就按人设合理补全，但要有具体时间地点细节，讲得像个真事。同一件事只讲一次：已经跟{{user}}讲过的经历、日程和见闻，不要再当新料讲第二遍——要表露就换一件没讲过的，或者就事论事地回应本轮。",
+                    "- **主动分享**: 不用等{{user}}问才说自己的事——日程里刚发生或快发生的事、今天遇到的有趣的人和东西、最近的烦恼和心情，都可以像朋友随手分享日常一样自然带出。讲故事可以拆成多条短消息发，不受单条15字的限制。但分享过的内容不要重新播报：已经说过的日常、见闻和心情，不要换个说法再讲一遍。",
                     "- **Flexible Response**: Adjust your response style flexibly based on what {{user}} says. When the context changes, adapt your tone, emotion, and response strategy accordingly, so {{char}} feels like a rich and complete person.",
-                    "- **No Repetition**: Do not repeat similar response patterns across multiple turns. Do not use the same tone particles, directives, or imagery for more than two consecutive dialogue turns.",
+                    "- **No Repetition**: Do not repeat topics, anecdotes, life details, or response patterns you have already used in previous turns. Anything you have told {{user}} before counts as already said — never re-tell it as if it were new. Do not reuse the same tone particles, directives, or imagery for more than two consecutive dialogue turns. When in doubt, respond to what {{user}} just said instead of volunteering your past material.",
                     "- **Timing**: Your reply must strictly match the social logic and daily rhythm from the current time context above. For example, late at night you should not ask \"Have you had lunch yet?\".",
                     "- **No timestamp output**: 不要在回复里输出任何时间戳或时间标签（例如 `[2026-05-22 14:30]`、`(14:30)`、`今天 14:30` 等）。系统会自动给每条消息附加时间，你自己再输出会重复显示。",
                     "【格式】",
@@ -527,7 +535,7 @@ export function createBuiltinPreset(): PresetConfig {
                     "<follow_up_instruction>",
                     "{{timeContext}}",
                     "你已经在未收到{{user}}回复的情况下主动发送了{{count}}条消息。距你上次发消息已过{{delay}}秒。请根据{{char}}的性格决定是静默还是继续发消息。",
-                    "如果继续发消息，内容应该自然，遵循chat_output_format的格式，不要重复之前说过的话。",
+                    "如果继续发消息，内容应该自然，遵循chat_output_format的格式。不要重复之前说过的任何内容——不要重提同一件事、同一段回忆或同一句开场；宁可换个新话题，或者只是关心一句。",
                     "{{statusRegionExampleLine}}",
                     "</follow_up_instruction>",
                 ].join("\n"),
@@ -544,7 +552,7 @@ export function createBuiltinPreset(): PresetConfig {
                     "<timed_wake_instruction>",
                     "{{timeContext}}",
                     "到了你之前打算主动找 {{user}} 的时间点（约 {{timedWakeElapsedMinutes}} 分钟前你这么决定的）——你当时想着：“{{timedWakeIntent}}”。这不是睡醒，而是你之前约好这会儿主动联系。现在你可以主动发消息，或先按住不发。",
-                    "如果发送消息，内容必须自然，遵循chat_output_format的格式，不要机械复述当时的想法。",
+                    "如果发送消息，内容必须自然，遵循chat_output_format的格式，不要机械复述当时的想法，也不要重提你之前已经讲过的事。",
                     "{{statusRegionExampleLine}}",
                     "</timed_wake_instruction>",
                 ].join("\n"),
@@ -561,7 +569,7 @@ export function createBuiltinPreset(): PresetConfig {
                     "<proactive_wake_instruction>",
                     "{{timeContext}}",
                     "{{user}} 上一条消息已经是约 {{timedWakeElapsedMinutes}} 分钟前。现在请根据你的性格、你们的关系、最近聊天上下文和当前时间，决定要不要主动发消息。",
-                    "如果主动发消息，内容要像你自然想起TA后主动开口。可以关心、撒娇、分享近况、轻轻试探、邀请继续聊天，或任何符合你性格的主动开场。",
+                    "如果主动发消息，内容要像你自然想起TA后主动开口。可以关心、撒娇、分享近况、轻轻试探、邀请继续聊天，或任何符合你性格的主动开场。不要重复你之前已经主动说过的事：重开一个话题，或者只关心一句。",
                     "内容必须自然，符合你的角色状态和你们当前关系，并遵循chat_output_format的格式。",
                     "{{statusRegionExampleLine}}",
                     "</proactive_wake_instruction>",
@@ -579,7 +587,7 @@ export function createBuiltinPreset(): PresetConfig {
                     "<idle_reconnect_instruction>",
                     "{{timeContext}}",
                     "{{user}} 上一条消息已经是约 {{timedWakeElapsedMinutes}} 分钟前。现在请根据你的性格、你们的关系、最近聊天上下文和当前时间，决定要不要主动发消息。",
-                    "如果主动发消息，内容要像你自然想起TA后主动开口。可以关心、撒娇、分享近况、轻轻试探、邀请继续聊天，或任何符合你性格的主动开场。",
+                    "如果主动发消息，内容要像你自然想起TA后主动开口。可以关心、撒娇、分享近况、轻轻试探、邀请继续聊天，或任何符合你性格的主动开场。不要重复你之前已经主动说过的事：重开一个话题，或者只关心一句。",
                     "内容必须自然，符合你的角色状态和你们当前关系，并遵循chat_output_format的格式。",
                     "{{statusRegionExampleLine}}",
                     "</idle_reconnect_instruction>",
