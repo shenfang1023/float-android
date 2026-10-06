@@ -16,6 +16,7 @@ import type {
 } from "./settings-types";
 import type { UserIdentity } from "@/components/settings/user-identity";
 import { createBuiltinPreset, BUILTIN_PRESET_VERSION } from "./builtin-preset";
+import { applyPresetRepetitionFixes } from "./preset-migrations";
 import { areTagsEqual, normalizePromptScopeTags, normalizeTags } from "./content-tag-utils";
 import {
     readPresetsCache, writePresetsCache,
@@ -199,6 +200,13 @@ export function loadPresets(): PresetConfig[] {
             savePresets(presets);
             shouldPersistCleanup = false;
         } else if (shouldPersistCleanup) {
+            savePresets(presets);
+        }
+
+        // 存量副本修复：老用户的内置预设副本里还带着"素材优先用日程/今日世界/记忆"
+        // 这组让模型天天复读旧事的指令，采样惩罚也还是 0。逐字替换只命中与旧出厂
+        // 文本完全一致的片段，用户改过的地方一字不动；幂等，改过即不再动。
+        if (applyPresetRepetitionFixes(presets)) {
             savePresets(presets);
         }
 

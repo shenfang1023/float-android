@@ -15,6 +15,7 @@ import { recordUserInteraction } from "./character-tier";
 import { parseAIResponse } from "./rich-message-parser";
 import { extractTextToolDirectiveText } from "./text-tool-protocol";
 import { findUserAvatarChangeIntent, inferAvatarDecisionFromReply } from "./chat-avatar-intent";
+import { normalizeForDuplicateCheck } from "./text-similarity";
 
 export const DEFAULT_VISION_IMAGE_PROMPT_LIMIT = 1;
 export const MAX_VISION_IMAGE_PROMPT_LIMIT = 20;
@@ -2431,10 +2432,13 @@ export function replaceMessageWithParts(
 }
 
 // 复读守卫：模型最常见的翻车是同一句话重复输出——同一条回复里连发两遍、
-// 或整段复读自己上一轮刚说过的话。气泡级去重，只动纯文本（结构化媒体卡不去重），
-// 阈值压得很保守：短句（"嗯""好"）自然重复放行，长句精确复读才丢弃。
-const normalizeBubbleForDup = (text: string) =>
-    text.replace(/\s+/g, "").replace(/[,.。!！?？~～…、，:：;；'"'""「」()（）\-—_【】\[\]]/g, "").toLowerCase();
+// 或整段复读自己上一轮刚说过的话。气泡级去重，只动纯文本（结构化媒体卡不去重）。
+// 判定走 lib/text-similarity 的公共归一化（去空白 + 各类标点符号，大小写无关），
+// 命中条件是与本批已保留的气泡、或与自己最近 8 条回复**逐字相同**。
+//
+// 两个长度阈值：同批 ≥6 字、跨轮 ≥10 字——短句（"嗯""好"）自然重复一律放行。
+const MIN_BATCH_DUPLICATE_LENGTH = 6;
+const MIN_HISTORY_DUPLICATE_LENGTH = 10;
 
 /**
  * 助手回复守卫：[撤回] 指令处理 + 复读去重。所有 assistant 文本入库路径
@@ -2443,8 +2447,8 @@ const normalizeBubbleForDup = (text: string) =>
  * - [撤回] 不产生气泡：先弹本批刚生成的最后一条（"说漏嘴当场收回"），
  *   本批已空才撤回历史上一条 assistant 消息（隔轮后悔，可连撤多条）。
  *   群聊里按 senderCharacterId 对齐——只能撤回自己成员的消息。
- * - 复读守卫：同批重复文本、与最近 assistant 消息完全相同的较长文本，丢弃；
- *   结构化媒体卡不参与去重，短句自然重复放行。
+ * - 复读守卫：同批重复文本、与最近 assistant 消息近似重复（不再要求逐字相等）的
+ *   较长文本，丢弃；结构化媒体卡不参与去重，短句自然重复放行。
  */
 export function applyAssistantPartGuards(
     sessionId: string,
@@ -2454,7 +2458,7 @@ export function applyAssistantPartGuards(
     const excludeIds = options?.excludeMessageIds;
     const senderCharacterId = options?.senderCharacterId;
 
-    const previousAssistantTexts = new Set<string>();
+    const previousAssistantTexts: string[] = [];
     const recentAssistants = _messagesCache
         .filter(m => m.sessionId === sessionId
             && m.role === "assistant"
@@ -2463,11 +2467,11 @@ export function applyAssistantPartGuards(
             && !m.mediaType)
         .slice(-8);
     for (const m of recentAssistants) {
-        const norm = normalizeBubbleForDup(m.content || "");
-        if (norm.length >= 10) previousAssistantTexts.add(norm);
+        const norm = normalizeForDuplicateCheck(m.content || "");
+        if (norm.length >= MIN_HISTORY_DUPLICATE_LENGTH) previousAssistantTexts.push(norm);
     }
 
-    const seenInBatch = new Set<string>();
+    const keptNormalized: string[] = [];
     const kept: typeof parts = [];
     const recalledMessageIds: string[] = [];
     let sawRecall = false;
@@ -2492,11 +2496,15 @@ export function applyAssistantPartGuards(
             continue;
         }
         if (!part.mediaType) {
-            const norm = normalizeBubbleForDup(part.content || "");
-            if (norm.length >= 6) {
-                if (seenInBatch.has(norm)) continue;
-                if (norm.length >= 10 && previousAssistantTexts.has(norm)) continue;
-                seenInBatch.add(norm);
+            const norm = normalizeForDuplicateCheck(part.content || "");
+            // 归一化后太短（"嗯""好"）本来就该重复，放行
+            if (norm.length >= MIN_BATCH_DUPLICATE_LENGTH) {
+                // 只认"归一化后完全相同"：被丢弃的气泡用户再也看不到，而一字之差
+                // 可能是真实的新信息（"三点见"→"四点见"），绝不能当成复读删掉。
+                // 近似重复交给提示词侧的历史折叠去抓——那边只是不喂给模型，不丢内容。
+                const duplicated = keptNormalized.includes(norm) || previousAssistantTexts.includes(norm);
+                if (duplicated) continue;
+                keptNormalized.push(norm);
             }
         }
         kept.push(part);

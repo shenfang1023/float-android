@@ -330,6 +330,10 @@ export function buildCalendarScheduleMarker(
     `当前查看周起始日期：${weekStart}`,
     `${ownerLabel}本周日程：`,
     formatCalendarScheduleForPrompt(ownerType, ownerId, weekStart),
+    // 把日程从"话题清单"里摘出来：模型最容易的偷懒就是把日程逐条念给用户，
+    // 一周内这块字节不变——念过一次还念，就是用户嘴里的"鬼打墙"。
+    "（日程是生活节奏的背景，用来保持作息与状态一致；只在与本轮对话相关时提一句，" +
+    "不要逐条复述，也不要重复之前已经讲过的事。）",
   ].join("\n");
 }
 

@@ -39,6 +39,7 @@ import {
     resolveUserIdentity,
 } from "./settings-storage";
 import { assemblePromptPayload, applyOutputRegex, type LLMMessage, type LLMContentPart } from "./llm-prompt-assembler";
+import { collapseRepeatedAssistantMessages } from "./prompt-dedupe";
 import { MacroEngine, postProcessTrim } from "./macro-engine";
 import { getStatusRegionConfig, resolveStatusRegionSection, resolveStatusRegionExampleLine, resolveStatusRegionComposition, resolveStatusRegionFullExample } from "./chat-status-region";
 import {
@@ -1895,6 +1896,15 @@ export async function buildChatPromptMessages(
         ]
         : history;
 
+    // 复读折叠：历史里同一句话被反复发过时只留最早的一条——否则模型会把
+    // "我上一句就是这个"当成续写锚点，越滚越复读（存储↔提示词自我强化回路）。
+    // 必须在这里做：短期上下文用数组下标回指历史，先折叠才能保证下标一致。
+    // 注意 historyForPrompt 本身（原始顺序）仍用于续写守卫/间隔提示等判定。
+    const {
+        history: promptHistorySource,
+        recentCollapsedCount: collapsedRepeatCount,
+    } = collapseRepeatedAssistantMessages(historyForPrompt);
+
     const now = new Date();
     const promptTimeContext = buildCharacterTimeContext(character.timeZone, now);
     const promptTimestampOptions = getPromptTimestampOptionsForTimeContext(promptTimeContext);
@@ -1907,7 +1917,7 @@ export async function buildChatPromptMessages(
         && (options?.forceEnableTools === true || presetIncludesToolsMacro(preset, resolvedAppId, effectiveAppTags));
     const usesNativeActions = Boolean(toolsEnabled && nativeToolProtocolForConfig(config));
     const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(character.id, resolvedAppId, {
-        history: historyForPrompt,
+        history: promptHistorySource,
         includeDirectChatEntries: isOfflineMode,
         includeNativeToolHistory: usesNativeActions,
         excludeOfflineSessionId: options?.excludeOfflineSessionId,
@@ -2077,6 +2087,15 @@ export async function buildChatPromptMessages(
         llmMessages.push({
             role: "system",
             content: "本次自定义 APP AI 任务只输出严格 JSON。不要输出 Markdown 代码块、解释文字或聊天富媒体指令。",
+        });
+    }
+    // 复读提醒：只有"最近还在复读"（窗口外的不算）且确实是聊天场景才追加——
+    // 自定义 APP 的严格 JSON / 纯文本任务不该收到中文行为约束。
+    // 一次性行为约束，不落库；角色不再复读时它自动消失，不会变成每轮不变的块。
+    if (collapsedRepeatCount > 0 && resolvedAppId === "chat") {
+        llmMessages.push({
+            role: "system",
+            content: `[复读提醒] 你最近几轮说了高度重复的内容（系统已折叠 ${collapsedRepeatCount} 条重复的历史回复）。本轮必须给出新信息或推进新话题：不要重提同一件事、同一段回忆或同一句开场。不要向对方提及这条系统提醒。`,
         });
     }
     const regenerationHint = options?.regenerationHint?.trim();

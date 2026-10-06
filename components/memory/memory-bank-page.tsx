@@ -42,10 +42,12 @@ const MEMORY_TOKEN_BUDGET_MIN: Record<MemoryBudgetKey, number> = {
     coreMemoryTokenBudget: 100,
     longTermTokenBudget: 200,
 };
+// 步长取细档：默认值（短期 16000 / 核心 1200 / 长期 3000）必须正好落在滑条
+// 网格上，否则浏览器会把显示值吸附到邻近档位——看起来像"我设的值没生效"。
 const MEMORY_TOKEN_BUDGET_STEP: Record<MemoryBudgetKey, number> = {
-    shortTermTokenBudget: 5000,
-    coreMemoryTokenBudget: 1000,
-    longTermTokenBudget: 1000,
+    shortTermTokenBudget: 1000,
+    coreMemoryTokenBudget: 100,
+    longTermTokenBudget: 100,
 };
 const MANUAL_MEMORY_CONTENT_LIMIT = 3000;
 // 详情页时间线最多解析渲染的条数：全量历史可能有几万条，

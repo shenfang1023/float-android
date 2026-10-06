@@ -57,6 +57,10 @@ export type Prompt = {
 export type PresetConfig = SettingItemMeta & {
     builtIn?: boolean;
     builtInVersion?: number;
+    /** 已应用过的"反重复"迁移版本（0/缺省 = 还没修过）。见 lib/preset-migrations.ts：
+     *  老用户的预设副本里带着"把日程/今日世界/记忆当聊天素材"的旧指令，需要逐字替换一次；
+     *  用版本号而不是"内容里有没有新文本"来判断，才不会把用户主动删掉的那句又塞回去。 */
+    repetitionFixVersion?: number;
     temperature: number;
     top_p: number;
     top_k: number;
