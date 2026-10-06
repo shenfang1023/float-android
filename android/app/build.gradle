@@ -27,6 +27,14 @@ android {
         }
     }
     signingConfigs {
+        debug {
+            // Shared certificate for Build Android Shell APK when no private release key exists.
+            // The Actions artifact is still a release build. This is not the private release key.
+            storeFile file("debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
         release {
             if (keystorePropertiesFile.exists()) {
                 storeFile file(keystoreProperties['storeFile'])
@@ -37,13 +45,17 @@ android {
         }
     }
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
         release {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            if (keystorePropertiesFile.exists()) {
-                signingConfig signingConfigs.release
-            }
+            // A private release key stays in keystore.properties and is never committed.
+            // Forks and Build Android Shell APK have no such file. Sign that release
+            // APK with the shared certificate so a later build can replace the previous one.
+            signingConfig keystorePropertiesFile.exists() ? signingConfigs.release : signingConfigs.debug
         }
     }
 }

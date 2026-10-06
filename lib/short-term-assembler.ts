@@ -41,6 +41,12 @@ import {
     resolvePromptTimeAware,
     type PromptTimestampOptions,
 } from "./prompt-time";
+import {
+    excerptSharedPersonalMemory,
+    groupMessageInvolvesCharacter,
+    scopeGroupTextForPersonalMemory,
+    textMentionsCharacter,
+} from "./group-memory-scope";
 
 function formatPhotoDirectiveForPrompt(msg: ChatMessage): string {
     const description = msg.mediaData?.label?.trim() || "图片";
@@ -166,6 +172,11 @@ export function loadNativeTimeline(
         excludeOfflineSessionId?: string;
         timeAware?: boolean;
         promptTimestampOptions?: PromptTimestampOptions;
+        /**
+         * 长期记忆总结用。群聊只保留这个角色的亲历，不把同群其他人的生活写进他的记忆。
+         * 聊天提示词的近期上下文不要开这个开关。
+         */
+        forPersonalMemory?: boolean;
     }
 ): NativeTimelineEntry[] {
     const entries: NativeTimelineEntry[] = [];
@@ -181,13 +192,44 @@ export function loadNativeTimeline(
     const session = sessions.find(s => !s.isGroup && s.contactId === characterId);
     const groupSessions = sessions.filter(s => s.isGroup && s.participantIds?.includes(characterId));
 
+    const personalMemory = options?.forPersonalMemory === true;
+    const partyNames = [charName.trim()].filter(Boolean);
+    const otherNames = chars
+        .filter(character => character.id !== characterId)
+        .map(character => character.name.trim())
+        .filter(name => name && !partyNames.includes(name));
+    const personalizeShared = (content: string): string | null => {
+        if (!personalMemory) return content;
+        return excerptSharedPersonalMemory(content, partyNames, otherNames);
+    };
+    const soloGroupIds = new Set(
+        groupSessions
+            .filter(gs => (gs.participantIds?.length ?? 0) <= 1)
+            .map(gs => gs.id),
+    );
+
     // Process group sessions
     for (const gs of groupSessions) {
         const messages = loadChatMessages(gs.id);
+        const soloCharacterGroup = soloGroupIds.has(gs.id);
+        const senderByMessageId = new Map<string, { characterId?: string; senderName?: string }>();
+        if (personalMemory && !soloCharacterGroup) {
+            for (const msg of messages) {
+                senderByMessageId.set(msg.id, {
+                    characterId: msg.senderCharacterId,
+                    senderName: msg.senderName,
+                });
+            }
+        }
         for (const msg of messages) {
             if (msg.isRetracted) continue;
             if (isPromptHiddenChatMessage(msg)) continue;
             if (options?.afterTimestamp && msg.createdAt <= options.afterTimestamp) continue;
+            if (personalMemory && !groupMessageInvolvesCharacter(msg, { characterId, names: partyNames }, {
+                soloCharacterGroup,
+                senderByMessageId,
+                otherNames,
+            })) continue;
 
             let sender: string;
             if (msg.role === "user") sender = userName;
@@ -258,6 +300,14 @@ export function loadNativeTimeline(
                 else if (msg.mediaType === "location") content = `[位置:${msg.mediaData?.label || ""}]`;
             }
 
+            if (!content.trim()) continue;
+            if (personalMemory) {
+                content = scopeGroupTextForPersonalMemory(content, msg, { characterId, names: partyNames }, {
+                    soloCharacterGroup,
+                    senderByMessageId,
+                    otherNames,
+                });
+            }
             if (!content.trim()) continue;
 
             entries.push({
@@ -406,17 +456,51 @@ export function loadNativeTimeline(
         const didCharacterLike = filteredLikes.some(like => like.authorType === "character" && like.authorId === characterId);
         const didCharacterComment = filteredComments.some(comment => comment.authorType === "character" && comment.authorId === characterId);
         const wasCharacterRepliedTo = filteredComments.some(comment => comment.replyToAuthorType === "character" && comment.replyToAuthorId === characterId);
-        if (!isCharPost && !isUserPost && !didCharacterLike && !didCharacterComment && !wasCharacterRepliedTo) continue;
+        const mentionedInPost = personalMemory && textMentionsCharacter(post.content, partyNames, otherNames);
+        const soloUserAudience = isUserPost && post.visibility.length <= 1;
+        const engaged = didCharacterComment || wasCharacterRepliedTo;
+        if (personalMemory) {
+            // 点赞别人的动态、或一条发给所有人的用户动态，都不是这个角色的亲历。
+            const keepPost = isCharPost
+                || (isUserPost && (soloUserAudience || mentionedInPost || engaged))
+                || (!isUserPost && (mentionedInPost || engaged));
+            if (!keepPost) continue;
+        } else if (!isCharPost && !isUserPost && !didCharacterLike && !didCharacterComment && !wasCharacterRepliedTo) {
+            continue;
+        }
 
         const postAuthor = post.authorType === "character"
             ? chars.find(ch => ch.id === post.authorId)
             : undefined;
         const authorName = isUserPost ? userName : (post.authorId === characterId ? charName : (postAuthor?.name ?? "某人"));
         const postAuthorType = isUserPost ? "user" as const : "character" as const;
+        let momentComments = filteredComments;
+        let momentLikes = filteredLikes;
+        let postBody = post.content;
+        if (personalMemory) {
+            momentComments = filteredComments.filter(comment => {
+                if (comment.authorType === "user") return true;
+                if (comment.authorType === "character" && comment.authorId === characterId) return true;
+                if (comment.replyToAuthorType === "character" && comment.replyToAuthorId === characterId) return true;
+                return textMentionsCharacter(comment.content, partyNames, otherNames);
+            });
+            if (!isCharPost) {
+                momentLikes = filteredLikes.filter(like =>
+                    like.authorType === "user"
+                    || (like.authorType === "character" && like.authorId === characterId),
+                );
+                if (!(isUserPost && soloUserAudience)) {
+                    postBody = excerptSharedPersonalMemory(post.content, partyNames, otherNames) ?? "";
+                }
+            }
+            if (!isCharPost && !postBody && momentComments.length === 0 && momentLikes.length === 0) continue;
+        }
 
-        // Skip entire post if both post and all comments are before afterTimestamp
-        if (options?.afterTimestamp && post.createdAt <= options.afterTimestamp && filteredComments.length === 0 && filteredLikes.length === 0) continue;
-        const eventTimestamps = [post.createdAt, ...filteredComments.map(c => c.createdAt), ...filteredLikes.map(like => like.createdAt)]
+        // 个人记忆只看留下来的评论和点赞，避免别人的新评论把旧动态再次推进总结。
+        const timedComments = personalMemory ? momentComments : filteredComments;
+        const timedLikes = personalMemory ? momentLikes : filteredLikes;
+        if (options?.afterTimestamp && post.createdAt <= options.afterTimestamp && timedComments.length === 0 && timedLikes.length === 0) continue;
+        const eventTimestamps = [post.createdAt, ...timedComments.map(c => c.createdAt), ...timedLikes.map(like => like.createdAt)]
             .filter(Boolean)
             .sort();
         const eventTimestamp = eventTimestamps[eventTimestamps.length - 1] || post.createdAt;
@@ -426,7 +510,9 @@ export function loadNativeTimeline(
         const locationPart = post.location ? ` 📍${post.location}` : "";
         const photoPart = post.photoDescription ? `，[照片:不使用参考图:${post.photoDescription}]` : "";
         const lines: string[] = [
-            `${postLabel} ${authorName}发了一条动态："${post.content}"${photoPart}${locationPart}`,
+            personalMemory && !postBody
+                ? `${postLabel} ${authorName}发了一条动态${locationPart}`
+                : `${postLabel} ${authorName}发了一条动态："${postBody}"${photoPart}${locationPart}`,
         ];
         const structuredComments: NativeMomentComment[] = [];
 
@@ -437,7 +523,7 @@ export function loadNativeTimeline(
             return chars.find(ch => ch.id === like.authorId)?.name ?? "未知";
         };
 
-        const likeNames = filteredLikes.map(resolveLikeName).filter(Boolean);
+        const likeNames = momentLikes.map(resolveLikeName).filter(Boolean);
         if (likeNames.length > 0) {
             lines.push(`♡ 点赞：${likeNames.join("，")}`);
         }
@@ -464,7 +550,7 @@ export function loadNativeTimeline(
         };
 
         // Build two-level threaded comment lines
-        const threads = buildTwoLevelMomentThreads(filteredComments);
+        const threads = buildTwoLevelMomentThreads(momentComments);
         for (const thread of threads) {
             const rootName = resolveCommentName(thread.root);
             const rootTs = timeAware ? formatPromptTimestamp(thread.root.createdAt, timestampOptions) : "";
@@ -478,7 +564,7 @@ export function loadNativeTimeline(
         }
 
         // Build structured comments for momentsMeta
-        for (const comment of filteredComments) {
+        for (const comment of momentComments) {
             const cName = resolveCommentName(comment);
             const replyToAuthorName = resolveReplyTarget(comment);
             structuredComments.push({
@@ -501,7 +587,7 @@ export function loadNativeTimeline(
             content: lines.join("\n"),
             momentsMeta: {
                 author: authorName,
-                content: post.content,
+                content: postBody,
                 location: post.location,
                 photoUrl: post.photoUrl,
                 photoDescription: post.photoDescription,
@@ -517,12 +603,14 @@ export function loadNativeTimeline(
         charName,
     });
     for (const storyEntry of storyEntries) {
+        const storyContent = storyEntry.shared ? personalizeShared(storyEntry.content) : storyEntry.content;
+        if (!storyContent) continue;
         entries.push({
             id: storyEntry.id,
             sourceApp: "story",
             sourceDetail: "story",
             timestamp: storyEntry.timestamp,
-            content: formatStoredPromptEventContent(storyEntry.content, {
+            content: formatStoredPromptEventContent(storyContent, {
                 label: "事件",
                 timestamp: storyEntry.timestamp,
                 timeAware,
@@ -537,6 +625,13 @@ export function loadNativeTimeline(
         excludeSessionId: options?.excludeOfflineSessionId,
     });
     for (const offlineEntry of offlineEntries) {
+        // 线下群聊摘要是整群共用的。个人记忆里只留下点到这个角色的句子。
+        let offlineContent = offlineEntry.content;
+        if (personalMemory && offlineEntry.groupSessionId && !soloGroupIds.has(offlineEntry.groupSessionId)) {
+            const excerpt = personalizeShared(offlineContent);
+            if (!excerpt) continue;
+            offlineContent = excerpt;
+        }
         entries.push({
             id: offlineEntry.id,
             sourceApp: "chat",
@@ -544,7 +639,7 @@ export function loadNativeTimeline(
             sessionId: offlineEntry.sessionId,
             groupSessionId: offlineEntry.groupSessionId,
             timestamp: offlineEntry.timestamp,
-            content: formatStoredPromptEventContent(offlineEntry.content, {
+            content: formatStoredPromptEventContent(offlineContent, {
                 label: "事件",
                 timestamp: offlineEntry.timestamp,
                 timeAware,
@@ -614,11 +709,13 @@ export function loadNativeTimeline(
         afterTimestamp: options?.afterTimestamp,
     });
     for (const mapEntry of sharedMapEntries) {
+        const mapContent = personalizeShared(renderUserNameMacro(mapEntry.content, userName));
+        if (!mapContent) continue;
         entries.push({
             id: mapEntry.id,
             sourceApp: "map",
             timestamp: mapEntry.timestamp,
-            content: formatStoredPromptEventContent(renderUserNameMacro(mapEntry.content, userName), {
+            content: formatStoredPromptEventContent(mapContent, {
                 label: "跑团游戏",
                 timestamp: mapEntry.timestamp,
                 timeAware,
@@ -704,13 +801,16 @@ export function loadNativeTimeline(
         afterTimestamp: options?.afterTimestamp,
     });
     for (const interviewEntry of interviewEntries) {
+        const interviewSource = renderUserNameMacro(interviewEntry.content, userName);
+        const interviewContent = interviewEntry.shared ? personalizeShared(interviewSource) : interviewSource;
+        if (!interviewContent) continue;
         entries.push({
             id: interviewEntry.id,
             sourceApp: "interview_magazine",
             sourceDetail: interviewEntry.shared ? "interview_shared_issue" : "interview_issue",
             authorType: "character",
             timestamp: interviewEntry.timestamp,
-            content: formatStoredPromptEventContent(renderUserNameMacro(interviewEntry.content, userName), {
+            content: formatStoredPromptEventContent(interviewContent, {
                 label: "访谈",
                 timestamp: interviewEntry.timestamp,
                 timeAware,

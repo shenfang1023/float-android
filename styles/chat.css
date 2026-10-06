@@ -3122,6 +3122,15 @@
   box-shadow: none;
   padding: 0;
 }
+/* 角色卡样式只能画在气泡里。绝对定位的全屏遮罩会被裁在气泡内。 */
+.chat-markdown {
+  position: relative;
+  overflow: hidden;
+}
+.chat-markdown pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
 .chat-markdown p,
 .chat-markdown-paragraph {
   margin: 0;

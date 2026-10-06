@@ -395,6 +395,8 @@ export type StoryProjectionEntry = {
   id: string;
   timestamp: string;
   content: string;
+  /** 多人剧情的摘要会原样抄进每个参与者；个人记忆只留点到本人的句子。 */
+  shared?: boolean;
 };
 
 class StoryDatabase extends Dexie {
@@ -946,6 +948,9 @@ export function loadStoryProjectionEntries(
     return !item.independentStory || Boolean(item.includedInMemoryAt);
   });
   if (!sessions.length) return [];
+  const sharedSessionIds = new Set(sessions
+    .filter(session => (session.participantIds?.length ? session.participantIds.length : 1) > 1)
+    .map(session => session.id));
   const messages = sessions.flatMap((session) => loadStoryMessages(session.id))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const projections: StoryProjectionEntry[] = [];
@@ -964,6 +969,7 @@ export function loadStoryProjectionEntries(
       id: `story_projection_${current.id}`,
       timestamp: current.createdAt,
       content: `[事件 ${ts}] ${summaryText}`,
+      shared: sharedSessionIds.has(current.sessionId),
     });
   }
 

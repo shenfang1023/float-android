@@ -6,6 +6,7 @@ import { LanguageIcon } from "@heroicons/react/24/solid";
 import { marked } from "marked";
 import { translateReasoningText } from "@/lib/reasoning-translate";
 import { CustomStatusFrame } from "@/components/chat/custom-status-frame";
+import { anchorGeneratedCss, scopeGeneratedCss } from "@/lib/css-scoper";
 
 export type StoryVoiceSegment = {
     id: string;
@@ -171,29 +172,25 @@ function splitNonFoldContent(text: string): Segment[] {
 
 // ── Markdown segment: marked + scoped HTML rendering ──
 
-/** Scope CSS selectors inside <style> blocks to prevent leaking */
+/** Scope CSS inside every <style> block, including ones with attributes. */
 function scopeStyles(html: string, scopeClass: string): string {
-    return html.replace(/<style>([\s\S]*?)<\/style>/gi, (_match, css: string) => {
-        // Prefix each CSS rule selector with the scope class
-        const scoped = css.replace(
-            /([^{}@/][^{}]*)\{/g,
-            (ruleMatch: string, selector: string) => {
-                const trimmed = selector.trim();
-                if (!trimmed || trimmed.startsWith("@") || trimmed.startsWith("from") ||
-                    trimmed.startsWith("to") || /^\d+%/.test(trimmed)) {
-                    return ruleMatch;
-                }
-                const prefixed = trimmed.split(",").map(s => {
-                    const st = s.trim();
-                    if (!st) return st;
-                    if (st === ":root") return `.${scopeClass}`;
-                    return `.${scopeClass} ${st}`;
-                }).join(", ");
-                return `${prefixed} {`;
-            }
-        );
-        return `<style>${scoped}</style>`;
+    const scopedBlocks: string[] = [];
+    let next = html.replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, (_match, css: string) => {
+        const token = `%%SCOPEDSTYLE${scopedBlocks.length}%%`;
+        scopedBlocks.push(`<style>${scopeGeneratedCss(css, `.${scopeClass}`)}</style>`);
+        return token;
     });
+    // An unclosed <style> (a reply that is still streaming, or a card that never
+    // closes the tag) would apply to the whole phone. Drop the tag; keep the text.
+    next = next.replace(/<style\b[^>]*>/gi, "");
+    next = next.replace(/<link\b[^>]*>/gi, (tag) => (
+        /\brel\s*=\s*(['"]?)[^'"]*stylesheet\1/i.test(tag) ? "" : tag
+    ));
+    next = anchorGeneratedCss(next);
+    for (let i = 0; i < scopedBlocks.length; i++) {
+        next = next.replace(`%%SCOPEDSTYLE${i}%%`, scopedBlocks[i]);
+    }
+    return next;
 }
 
 // Configure marked for chat-style line breaks.

@@ -412,10 +412,10 @@ export function MemoryBankPage({
             const afterTimestamp = range === "all"
                 ? undefined
                 : sinceTimestamp ?? getLastSummarizedTimestamp(selectedCharId) ?? undefined;
-            const timelineCount = loadNativeTimeline(
-                selectedCharId,
-                afterTimestamp ? { afterTimestamp } : undefined,
-            ).length;
+            const timelineCount = loadNativeTimeline(selectedCharId, {
+                ...(afterTimestamp ? { afterTimestamp } : {}),
+                forPersonalMemory: true,
+            }).length;
             if (timelineCount < 4) {
                 showNotice("所选范围内事件不足 4 条");
                 return;
@@ -1298,6 +1298,7 @@ export function MemoryBankPage({
                 ) : null}
 
                 {/* Feature toggles */}
+                <p className="menu-group-desc mx-2">群聊里别人的事不会写进这个角色的长期记忆。只有他本人说的，或别人直接提到他、回应他的内容，才会留下。</p>
                 <p className="menu-group-desc mx-2">自动化</p>
                 <div className="menu-group">
                     <div className="menu-item">
@@ -1323,6 +1324,20 @@ export function MemoryBankPage({
                         <div className="menu-right">
                             <Toggle checked={config.autoBuildCoreEnabled ?? true} onChange={(v) => {
                                 const next = { ...config, autoBuildCoreEnabled: v };
+                                setConfig(next);
+                                saveMemoryConfig(next);
+                            }} />
+                        </div>
+                    </div>
+                    <div className="menu-item">
+                        <MemorySettingsIcon icon={Brain} color={BINDING_ACCENTS.memory} />
+                        <div className="menu-label-group">
+                            <span className="menu-label">自动性格漂移</span>
+                            <span className="menu-desc">默认关闭。打开后，空闲整理才可以把持续的性格变化写进下次聊天。关闭时已有变化不再注入对话。</span>
+                        </div>
+                        <div className="menu-right">
+                            <Toggle checked={config.autoPersonaDriftEnabled === true} onChange={(v) => {
+                                const next = { ...config, autoPersonaDriftEnabled: v };
                                 setConfig(next);
                                 saveMemoryConfig(next);
                             }} />
@@ -1452,7 +1467,7 @@ export function MemoryBankPage({
                         <div className="menu-label-group">
                             <span className="menu-label">核心记忆总结提示词</span>
                             <span className="menu-desc">
-                                变量：{"{{char}}"} 角色、{"{{earliest}}"} 起始时间、{"{{latest}}"} 结束时间、{"{{events}}"} 长期记忆集合
+                                变量：{"{{char}}"} 角色、{"{{earliest}}"} 起始时间、{"{{latest}}"} 结束时间、{"{{events}}"} 长期记忆集合、{"{{cardFacts}}"} 人物卡核对摘录
                             </span>
                         </div>
                         {!isCoreDefault && (

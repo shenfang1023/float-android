@@ -52,7 +52,7 @@ API 配置里的开关。开启后支持 function calling 的模型走原生工�
 主题 App → 状态栏：「状态栏位置」可调节状态栏文字和图标的垂直位置，支持负值上移（顶部空间偏大的浏览器如 Edge 适用），点「重置」恢复默认；同页有「隐藏灵动岛」开关。
 
 ### Q: 安卓无法全屏 / 底部被系统状态栏顶出屏幕？
-主题 App → 状态栏 → 「状态栏占位上移」调大：把整块画面上移、裁掉顶部状态栏占位，调到刚好铺满即可（约等于真实状态栏高度）；iOS 能正常全屏，保持 0。个别设备仍显示异常时改用 test 分支部署的版本。
+主题 App → 状态栏 → 「状态栏占位上移」调大：把整块画面上移、裁掉顶部状态栏占位，调到刚好铺满即可（约等于真实状态栏高度）；iOS 能正常全屏，保持 0。个别设备仍有缝隙时，在同一页把占位再调一点。
 
 ### Q: 怎么隐藏聊天界面里的原生思维链？
 在聊天自定义 CSS 里加：.chat-reasoning-trigger { display: none !important; } 即可隐藏消息里的思维链触发条（.chat-reasoning-sheet 相关类是点开后的详情面板，一般不用动）。
@@ -60,32 +60,27 @@ API 配置里的开关。开启后支持 function calling 的模型走原生工�
 ## 数据与备份
 
 ### Q: 数据存在哪里？换设备/清浏览器数据会怎样？
-所有数据存在浏览器本地（IndexedDB）。清浏览器数据会丢档；换设备需要在设置里导出备份，再到新设备导入。建议定期备份。
+所有数据存在本机的 IndexedDB。清理站点数据或卸载会丢掉还没导出的内容。安装包每 6 小时自动备份到系统「文档」目录，Android 需要「所有文件访问」权限。网页版用 Chrome 或 Edge 打开「设置 → 数据管理」，点自动备份并选一个文件夹，之后按同样的间隔写入，保留最近 3 份。不能选择文件夹的浏览器用同一页的手动导出。换设备时先导出，再在新设备导入。
 
 ### Q: 存储空间不够 / 数据异常？
 用工坊的「存储体检」工具检查 IndexedDB 使用量和健康状况。
 
-## 部署与分支
+## 部署
 
-### Q: 怎么部署自己的实例？
-可部署到 Netlify / Vercel：导入仓库 → 选 main 或 test 分支 → 构建设置默认 → 平台后台添加环境变量 NEXT_PUBLIC_SELF_HOSTED_MODE=true → 部署。本地运行：Node.js 20+，npm install && npm run dev（默认端口 3001）。
+### Q: 怎么部署？
+两种方式，部署使用 main。
 
-### Q: main 和 test 分支有什么区别？
-main 是正常设备版；test 是兼容设备版。部分设备全屏或显示异常时改部署 test 分支，功能保持同步。
+安装包：Fork 仓库，在 Actions 里运行 Build Android Shell APK，下载附件 float-android- 加版本号，解压得到 float-android-<版本号>.apk 后安装，例如 float-android-1.0.2.apk。这是正式构建。附件保留 14 天。更新时用 Sync fork 拉新提交，再构建一次。仓库不放私人签名，这些包用共享证书签名，可以覆盖上一只自己构建的包。手机认源码里的 versionCode，这个数字加一之后，系统才会把它当成更新。以前装过另一把证书的包，第一次要先导出存档，卸载后再安装，然后导入。
 
-### Q: NEXT_PUBLIC_SELF_HOSTED_MODE 是什么？
-true = 单机模式，跳过账号/激活码门禁，用本地账号直接进入（个人自部署推荐）；false = 启用账号门禁，需要自建 Supabase 并配置 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY / ACCOUNT_GATE_SECRET。
+网页：把仓库交给 Netlify、Cloudflare Pages、Vercel，或任何静态托管。构建命令是 npm run build，发布目录是 out，站点挂在域名根目录。Netlify 和 Vercel 会读仓库里的配置。Cloudflare Pages 在项目设置里填同样的构建命令和输出目录。环境变量可以留空。本地预览：Node.js 20+，npm install，然后 npm run dev（端口 3001）。npm run build 之后也可以把 out 目录直接上传。
+
+网页从浏览器直接请求用户填写的 API，接口需要允许这个网站跨域。https 站点上填写 http 的局域网地址时，浏览器可能会拦住。生成在页面打开时进行。
+
+### Q: 还要设置 NEXT_PUBLIC_SELF_HOSTED_MODE 或 Supabase 吗？
+不用。打开就能用，没有账号门禁。数据在本机。可选环境变量只有生图代理和网易云默认地址，不填也能在应用里配置。
 
 ### Q: 哪些环境变量不能公开？
-NEXT_PUBLIC_ 开头的变量会打包进浏览器代码、完全公开。Supabase service_role、后台管理密钥、第三方 API 私钥绝不能写进任何 NEXT_PUBLIC_ 变量。
-
-## 云端功能（Supabase）
-
-### Q: 哪些功能需要自建 Supabase？
-账号、激活码、成年审核、便签墙、游戏大厅、应用市场、黑市剧场等云端共享功能。在 Supabase SQL Editor 按需执行仓库 docs/ 下的建表脚本（account / verify / notewall / game-hall / custom-app-market / black-market / push 等 .sql 文件），然后在部署平台填服务端密钥。
-
-### Q: 便签墙实时刷新 / 多人联机怎么开？
-额外配置 NEXT_PUBLIC_SUPABASE_URL 和 NEXT_PUBLIC_SUPABASE_ANON_KEY（anon key 可公开）；联机需先执行 docs/online-play-supabase.sql。
+NEXT_PUBLIC_ 开头的变量会打包进网页，访客都能看到。第三方 API 私钥不要写进这类变量。密钥填在应用的设置里，存在本机。
 
 ## 应用市场与自定义 APP
 

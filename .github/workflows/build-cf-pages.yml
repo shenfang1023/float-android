@@ -1,19 +1,29 @@
 name: Build static site
 
+# Checks that the website build still produces out/.
+# Hosting itself is method 2 in the README: Netlify, Cloudflare Pages, Vercel, or any static server.
+
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - "app/**"
+      - "entries/**"
       - "components/**"
       - "lib/**"
+      - "styles/**"
       - "public/**"
       - "custom-apps/**"
-      - "data/**"
-      - "next.config.mjs"
+      - "app-store-apps/**"
+      - "world-builder/**"
+      - "characters/**"
+      - "index.html"
+      - "vite.config.ts"
       - "package.json"
       - "package-lock.json"
+      - "netlify.toml"
+      - "vercel.json"
+      - ".npmrc"
       - ".github/workflows/build-cf-pages.yml"
 
 jobs:

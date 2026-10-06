@@ -1,10 +1,17 @@
 package app.floatphone.app;
 
 import android.os.Bundle;
+import android.util.Log;
+import android.webkit.RenderProcessGoneDetail;
+import android.webkit.WebView;
 
 import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.WebViewListener;
 
 public class MainActivity extends BridgeActivity {
+
+    /** 渲染进程刚被系统杀掉时正在 reload。第二次再死就停，避免 OOM 循环把页面刷死。 */
+    private boolean rendererRecovering;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -27,6 +34,31 @@ public class MainActivity extends BridgeActivity {
         // 应用内有自己的文字缩放设置，不需要系统层再叠一层。
         if (getBridge() != null && getBridge().getWebView() != null) {
             getBridge().getWebView().getSettings().setTextZoom(100);
+        }
+        // 生成把 WebView 渲染进程撑死后，系统默认是留下一块白屏。
+        // 返回 true 表示应用自己处理；页面重新载入后这次生成会丢掉，但手机还能用。
+        if (getBridge() != null) {
+            getBridge().addWebViewListener(new WebViewListener() {
+                @Override
+                public void onPageLoaded(WebView webView) {
+                    rendererRecovering = false;
+                }
+
+                @Override
+                public boolean onRenderProcessGone(WebView webView, RenderProcessGoneDetail detail) {
+                    Log.e("MainActivity", "webview renderer gone, recovering=" + rendererRecovering);
+                    if (webView == null || rendererRecovering) return true;
+                    rendererRecovering = true;
+                    webView.post(() -> {
+                        try {
+                            webView.reload();
+                        } catch (RuntimeException error) {
+                            Log.e("MainActivity", "webview reload after renderer loss failed", error);
+                        }
+                    });
+                    return true;
+                }
+            });
         }
     }
 }

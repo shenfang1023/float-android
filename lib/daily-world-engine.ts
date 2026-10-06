@@ -19,7 +19,14 @@ import {
     replaceCalendarWeekItems,
     normalizeGeneratedScheduleItems,
 } from "./calendar-storage";
-import { getWeekStartIso, getWeekdayLabel, sortScheduleItems } from "./calendar-utils";
+import { getWeekdayLabel, sortScheduleItems } from "./calendar-utils";
+import {
+    formatScheduleClockRule,
+    getSystemTimeZone,
+    getZonedClock,
+    normalizeTimeZone,
+    weekStartFromIsoDate,
+} from "./character-time";
 import { partitionByTier } from "./character-tier";
 import { formatCharacterRelationsForPrompt } from "./character-world-storage";
 import { loadDailyWorldPlan, saveDailyWorldPlan } from "./daily-world-storage";
@@ -30,9 +37,9 @@ const MAX_DAY_ITEMS = 6;
 
 // ── Phase A ──────────────────────────────────────────────
 
-function buildOutlinePrompt(date: string, roster: { name: string; brief: string; relations: string }[]): string {
+function buildOutlinePrompt(date: string, roster: { name: string; brief: string; relations: string; clock: string }[]): string {
     const rosterText = roster.map((r, i) =>
-        `[${i + 1}] ${r.name}\n简介：${r.brief || "（无）"}${r.relations ? `\n关系：${r.relations}` : ""}`
+        `[${i + 1}] ${r.name}\n简介：${r.brief || "（无）"}${r.relations ? `\n关系：${r.relations}` : ""}\n时区：${r.clock}`
     ).join("\n\n");
     return `你在为一部群像生活剧设计「今日世界」：${date}。
 
@@ -41,12 +48,14 @@ ${rosterText}
 
 根据他们的身份、彼此关系（同校/同事/打过比赛/暧昧等），推演这一天世界里自然会发生什么。
 只安排符合关系线的互动——不熟的人不会突然约饭，有过节的可以偶遇起冲突。
+每个角色后面单独排课的 HH:MM 用花名册里的时区。设了时区的角色按那个时区的钟点排，按手机或北京时间排课是错的。
+跨时区的共同 EVENT 只写清晨、上午、傍晚、夜里，不写一个所有人共用的 HH:MM。
 
 严格按以下格式输出（不要输出任何其他内容）：
 
 WEATHER|<一句话天气>
 VIBE|<一句话当日整体氛围/背景>
-EVENT|<时段如"下午"或"15:00-16:00">|<地点>|<参与者名字,逗号分隔>|<一件事描述>
+EVENT|<时段如"傍晚"或同一时区内的"15:00-16:00">|<地点>|<参与者名字,逗号分隔>|<一件事描述>
 （EVENT 最多 ${MAX_INTERACTIONS} 条；可以少于这个数，没有合适互动就只出 0-1 条；每条必须是≥2人真正同场的事，不是各自单独的日程）`;
 }
 
@@ -102,6 +111,7 @@ function buildDayInstruction(
     weekday: string,
     assigned: DailyWorldInteraction[],
     nameOf: (id: string) => string,
+    timeZone?: string | null,
 ): string {
     const assignedText = assigned.length
         ? assigned.map((it, i) =>
@@ -125,6 +135,8 @@ function buildDayInstruction(
         "事项写法：每条≤30字，用客观简洁的记录风格写行为事实，像日志而不是散文——",
         "正确示例：「在便利店买了三明治当午饭」「陪她试婚纱，提了两句意见」；",
         "错误示例：「阳光透过百叶窗在地板上投下斑驳的光影，他陷入了沉思」（不要这种文艺渲染）。",
+        formatScheduleClockRule(timeZone),
+        `输出的日期必须是 ${date}。时间基准里的当地现在只用来对齐作息，不要改日期。`,
     ].join("\n");
 }
 
@@ -178,11 +190,11 @@ const MAX_NPC_DAY_ITEMS = 3;
 function buildNpcBatchInstruction(
     date: string,
     weekday: string,
-    npcs: { name: string; brief: string; assigned: string[] }[],
+    npcs: { name: string; brief: string; assigned: string[]; timeZone?: string | null }[],
 ): string {
     const roster = npcs.map((n, i) => {
         const assigned = n.assigned.length ? `\n  今日已确定参与的互动：${n.assigned.join("；")}` : "";
-        return `[${i + 1}] ${n.name}（${n.brief || "配角"}）${assigned}`;
+        return `[${i + 1}] ${n.name}（${n.brief || "配角"}）${assigned}\n  ${formatScheduleClockRule(n.timeZone)}`;
     }).join("\n");
     return `请为以下配角批量生成 ${date}（${weekday}）的日程——他们是背景人物，日程只用来给世界一点生活质感，不需要细致：
 
@@ -190,7 +202,8 @@ ${roster}
 
 严格按以下格式输出，每个配角 0~${MAX_NPC_DAY_ITEMS} 条，没合适的就不输出该角色：
 NPCDAY|<角色名字>|<开始HH:MM>|<结束HH:MM>|<地点>|<事项>
-要求：事项≤16字，客观简洁；已分配互动的配角必须包含对应时段的条目；其余日常符合人物身份即可。`;
+要求：事项≤16字，客观简洁；已分配互动的配角必须包含对应时段的条目；其余日常符合人物身份即可。
+HH:MM 按该角色自己的时间基准书写。输出日期对应的是 ${date}，不要改成别的日子。`;
 }
 
 function parseNpcBatchOutput(
@@ -248,7 +261,8 @@ ${mentionText}
 
 严格按格式输出（不要输出其他内容），每行一条最终确认的互动：
 FINAL|<大纲编号或NEW>|<开始HH:MM>|<结束HH:MM>|<地点>|<参与者名字,逗号分隔>|<发生的事>|<结果/氛围一句话>
-（同一互动若两个角色版本时间漂移，取交集合理值；角色自发产生的大纲外互动标 NEW 也可收录；最多 ${MAX_INTERACTIONS} 条）`;
+（同一互动若两个角色版本时间漂移，取交集合理值；角色自发产生的大纲外互动标 NEW 也可收录；最多 ${MAX_INTERACTIONS} 条）
+开始和结束用参与者共同的本地钟点。参与者时区不同时，开始和结束两段留空，时段写进事件描述。`;
 }
 
 function parseReconcileOutput(
@@ -269,12 +283,14 @@ function parseReconcileOutput(
             .map(n => nameToId.get(n.trim()))
             .filter((id): id is string => Boolean(id));
         if (participantIds.length < 2) continue;
+        const startTime = /^\d{1,2}:\d{2}$/.test(parts[2]) ? parts[2] : undefined;
+        const endTime = /^\d{1,2}:\d{2}$/.test(parts[3]) ? parts[3] : undefined;
         finals.push({
             id: base?.id ?? `dw_evt_${Date.now()}_${finals.length}_${Math.random().toString(36).slice(2, 5)}`,
             participantIds,
-            timeHint: base?.timeHint ?? `${parts[2]}-${parts[3]}`,
-            startTime: parts[2],
-            endTime: parts[3],
+            timeHint: base?.timeHint ?? (startTime && endTime ? `${startTime}-${endTime}` : "同时段"),
+            startTime,
+            endTime,
             place: parts[4] === "无" ? "" : parts[4],
             what: parts[6],
             outcome: parts.slice(7).join("|") || undefined,
@@ -303,6 +319,16 @@ export async function generateDailyWorld(
     const nameToId = new Map<string, string>(chars.map(c => [c.name.trim(), c.id]));
     const nameOf = (id: string) =>
         id === "__user__" ? "用户" : (chars.find(c => c.id === id)?.name ?? id);
+    const zoneOf = (id: string) => {
+        if (id === "__user__") return getSystemTimeZone();
+        return normalizeTimeZone(chars.find(c => c.id === id)?.timeZone) || getSystemTimeZone();
+    };
+    const softenCrossZoneHint = (hint: string, participantIds: string[]) => {
+        const zones = new Set(participantIds.map(zoneOf));
+        if (zones.size <= 1 || !/\d{1,2}:\d{2}/.test(hint)) return hint;
+        const stripped = hint.replace(/\d{1,2}:\d{2}(?:\s*[-~～到至]\s*\d{1,2}:\d{2})?/g, "").replace(/\s+/g, " ").trim();
+        return stripped || "各自本地同一时段";
+    };
 
     // API 解析：用第一个角色的主对话绑定跑大纲/撮合（保持一致风格）
     const bindings = loadBindingConfig();
@@ -313,11 +339,18 @@ export async function generateDailyWorld(
 
     // ── Phase A ──
     options?.onProgress?.("outline", "推演今日世界…");
-    const roster = chars.map(c => ({
-        name: c.name,
-        brief: c.briefPersona?.trim() || c.persona?.slice(0, 160) || "",
-        relations: formatCharacterRelationsForPrompt(c.id).trim(),
-    }));
+    const roster = chars.map(c => {
+        const clock = getZonedClock(c.timeZone);
+        const named = normalizeTimeZone(c.timeZone);
+        return {
+            name: c.name,
+            brief: c.briefPersona?.trim() || c.persona?.slice(0, 160) || "",
+            relations: formatCharacterRelationsForPrompt(c.id).trim(),
+            clock: named
+                ? `${named}，当地现在 ${clock.dateIso} ${clock.label}`
+                : `手机时区 ${clock.timeZone}，当地现在 ${clock.dateIso} ${clock.label}`,
+        };
+    });
     const outlineRes = await simpleLLMCall(
         outlineApi,
         [{ role: "user", content: buildOutlinePrompt(date, roster) }],
@@ -325,11 +358,14 @@ export async function generateDailyWorld(
     );
     if (!outlineRes.content) return { success: false, error: outlineRes.error || "世界日纲生成失败" };
     const outline = parseOutlineOutput(outlineRes.content, nameToId);
+    for (const interaction of outline.interactions) {
+        interaction.timeHint = softenCrossZoneHint(interaction.timeHint, interaction.participantIds);
+    }
 
     // ── Phase B ──
     // 主角逐个完整生成；配角（NPC）全部并进一次批量简版调用
     const { mains, npcs } = partitionByTier(chars);
-    const weekStart = getWeekStartIso(new Date(`${date}T12:00:00`));
+    const weekStart = weekStartFromIsoDate(date);
     const perCharMentions: { name: string; mentions: { time: string; partners: string[]; what: string }[] }[] = [];
     const perCharacterItems: Record<string, number> = {};
 
@@ -338,7 +374,7 @@ export async function generateDailyWorld(
         const assigned = outline.interactions.filter(i => i.participantIds.includes(char.id));
         try {
             const resolved = await resolveCalendarAssemblerInput("character", char.id, weekStart);
-            const instruction = buildDayInstruction(char.name, date, getWeekdayLabel(date), assigned, nameOf);
+            const instruction = buildDayInstruction(char.name, date, getWeekdayLabel(date), assigned, nameOf, char.timeZone);
             const messages: LLMMessage[] = [
                 ...resolved.llmMessages,
                 { role: "user", content: instruction, _debugMeta: { marker: "daily_world_day" } },
@@ -391,6 +427,7 @@ export async function generateDailyWorld(
             const npcInputs = npcs.map(c => ({
                 name: c.name,
                 brief: (c.briefPersona?.trim() || c.persona?.slice(0, 80) || "").slice(0, 80),
+                timeZone: c.timeZone,
                 assigned: outline.interactions
                     .filter(i => i.participantIds.includes(c.id))
                     .map(i => `${i.timeHint} @${i.place || "未定"} 与${i.participantIds.filter(p => p !== c.id).map(nameOf).join("、")}——${i.what}`),
@@ -427,6 +464,13 @@ export async function generateDailyWorld(
             const finals = parseReconcileOutput(recRes.content, outline.interactions, nameToId);
             if (finals.length) finalInteractions = finals;
         }
+    }
+    for (const interaction of finalInteractions) {
+        const zones = new Set(interaction.participantIds.map(zoneOf));
+        if (zones.size <= 1) continue;
+        interaction.startTime = undefined;
+        interaction.endTime = undefined;
+        interaction.timeHint = softenCrossZoneHint(interaction.timeHint, interaction.participantIds);
     }
 
     // 撮合结果回写：给命中的日程项 stamp dayEventId + participants

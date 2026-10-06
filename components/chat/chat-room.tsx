@@ -103,8 +103,11 @@ import {
 // Call messages are stored with user/assistant role for correct prompt alternation,
 // but should render as centered system notifications in the UI.
 const CALL_SYS_RE = /\[我(?:向.+)?(?:发起了|挂断了|拒绝了|取消了)(?:群?(?:语音|视频)通话)/;
+function messageText(content: unknown): string {
+    return typeof content === "string" ? content : "";
+}
 function isCallSysMsg(msg: ChatMessage): boolean {
-    return CALL_SYS_RE.test(msg.content);
+    return CALL_SYS_RE.test(messageText(msg.content));
 }
 /** Returns the effective UI role: call messages render as "system" regardless of stored role */
 const ACTION_MEDIA_TYPES = new Set(["poke", "accept_red_packet", "decline_red_packet", "accept_transfer", "decline_transfer", "accept_payment_request", "decline_payment_request", "group_admin_notice"]);
@@ -227,7 +230,7 @@ const STANDALONE_CARD_BUBBLE_STYLE = {
 } as const;
 
 function getChatFlowVisibleContent(msg: ChatMessage, displayContent?: string): string {
-    return normalizeTextBubbleContent(displayContent ?? msg.content);
+    return normalizeTextBubbleContent(messageText(displayContent ?? msg.content));
 }
 
 function isChatVisualMedia(msg: ChatMessage): boolean {
@@ -1591,11 +1594,12 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         return out;
     }, [activeRegexes, displayRegexMacroEngine, getRegexActiveTags]);
 
-    const getMessageDisplayContent = useCallback((message: RenderChatMessage): string => (
-        message.displayProjected
-            ? message.content
-            : renderDisplayText(message.content, message.role === "user" ? 1 : 2, false)
-    ), [renderDisplayText]);
+    const getMessageDisplayContent = useCallback((message: RenderChatMessage): string => {
+        const content = messageText(message.content);
+        return message.displayProjected
+            ? content
+            : renderDisplayText(content, message.role === "user" ? 1 : 2, false);
+    }, [renderDisplayText]);
 
     const applyEditTextRegex = useCallback((
         text: string,
@@ -2705,7 +2709,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     const hasKnownGroupSenderPrefix = (text: string) => {
         return groupCharacters.some((groupCharacter) => {
             const escapedName = groupCharacter.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            return new RegExp(`^\\[${escapedName}\\]:\\s*`, "m").test(text);
+            return new RegExp(`^(?:\\[|【)?${escapedName}(?:\\]|】)?\\s*[:：]\\s*`, "m").test(text);
         });
     };
 
@@ -3240,6 +3244,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     },
                 );
                 if (!isCurrentGeneration()) return;
+                if (results.length === 0) {
+                    showChatToast("群聊回复没有标出是谁说的，这条没有记到任何人身上");
+                }
                 await processGroupParts(results, setMessages, generationGuard, roundReasoning);
             } else {
                 let capturedReasoning: string | undefined;
@@ -3671,6 +3678,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     appTags: theaterMode ? ["group_chat"] : undefined,
                 });
                 if (!isCurrentGeneration()) return;
+                if (results.length === 0) {
+                    showChatToast("群聊回复没有标出是谁说的，这条没有记到任何人身上");
+                }
                 if (streamedImageReplacementTasks.length > 0) {
                     await Promise.allSettled(streamedImageReplacementTasks);
                     throwIfGenerationStopped(generationGuard);
@@ -4829,7 +4839,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 
     const handleTranslateMessage = (m: RenderChatMessage) => {
         const storedId = getStoredActionMessageId(m);
-        const text = getMessageDisplayContent(m).trim() || m.content.trim();
+        const text = getMessageDisplayContent(m).trim() || messageText(m.content).trim();
         setActiveMessageId(null);
         if (!text || translatingMessageIds.has(storedId)) return;
         setTranslatingMessageIds(prev => new Set(prev).add(storedId));
@@ -5215,8 +5225,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             const msg = projectedMessages[i];
             if (uiRole(msg) !== "system") { i++; continue; }
             // Detect call START precisely: "发起了语音通话" / "发起了视频通话"
-            const isVoiceStart = msg.content.includes("发起了语音通话");
-            const isVideoStart = msg.content.includes("发起了视频通话");
+            const content = messageText(msg.content);
+            const isVoiceStart = content.includes("发起了语音通话");
+            const isVideoStart = content.includes("发起了视频通话");
             if (isVoiceStart || isVideoStart) {
                 const callType = isVideoStart ? "video" : "voice";
                 const kw = isVideoStart ? "视频通话" : "语音通话";
@@ -5224,7 +5235,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 let duration = "";
                 for (let j = i + 1; j < projectedMessages.length; j++) {
                     if (uiRole(projectedMessages[j]) !== "system") continue;
-                    const c = projectedMessages[j].content;
+                    const c = messageText(projectedMessages[j].content);
                     // Another call start → separate call, stop
                     if (c.includes("发起了语音通话") || c.includes("发起了视频通话")) break;
                     // Call end: 挂断/拒绝/取消（兼容"群语音通话"/"群视频通话"）

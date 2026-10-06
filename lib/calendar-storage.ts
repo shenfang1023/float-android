@@ -1,9 +1,9 @@
 import type { CalendarColorKey, CalendarOwnerType, CalendarScheduleItem, CalendarWeekPlan } from "./calendar-types";
+import { loadCharacters } from "./character-storage";
+import { getZonedClock, type ZonedClock } from "./character-time";
 import {
-  formatIsoDate,
   getOwnerStorageKey,
   getWeekDates,
-  getWeekStartIso,
   getWeekdayLabel,
   isCalendarColorKey,
   isCalendarTimeRangeAllowed,
@@ -252,14 +252,26 @@ export function formatCalendarScheduleItemForPrompt(item: Pick<CalendarScheduleI
   return `${item.startTime}-${item.endTime} @${item.location || "未定"} ${item.title}`;
 }
 
+/** 用户跟手机时区。角色跟自己的 timeZone；没填则跟手机。 */
+export function clockForCalendarOwner(
+  ownerType: CalendarOwnerType,
+  ownerId: string,
+  now = new Date(),
+): ZonedClock {
+  if (ownerType !== "character") return getZonedClock(null, now);
+  const timeZone = loadCharacters().find(character => character.id === ownerId)?.timeZone;
+  return getZonedClock(timeZone, now);
+}
+
 export function getCurrentCalendarScheduleForPrompt(
   ownerType: CalendarOwnerType,
   ownerId: string,
   now = new Date(),
 ): string {
-  const date = formatIsoDate(now);
-  const weekStart = getWeekStartIso(now);
-  const currentMinute = now.getHours() * 60 + now.getMinutes();
+  const clock = clockForCalendarOwner(ownerType, ownerId, now);
+  const date = clock.dateIso;
+  const weekStart = clock.weekStartIso;
+  const currentMinute = clock.minutes;
   const plan = loadCalendarWeekPlan(ownerType, ownerId, weekStart);
   if (!plan) return "无";
 

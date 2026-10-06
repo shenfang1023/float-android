@@ -1,9 +1,8 @@
 // lib/memory-consolidation.ts
-// 空闲固化循环：角色在空闲时自主整理记忆——GA 的 reflection 层 + MemGPT 式自管理。
-// 三件事：
-//   1. 反思：把近期记忆编号喂给主对话模型，生成跨记忆高层洞察（kind=reflection，links→证据）
-//   2. 性格漂移：反思附带 TRAIT 提案 → trait_shift 记忆 + PersonaState 覆盖层（全自动，driftLog 可撤销）
-//   3. 去重：内容几乎相同的同 kind 条目合并（保新删旧，links 并集）——只合并不删记忆红线不破
+// 空闲固化循环：角色在空闲时自主整理记忆。
+//   1. 反思：跨多条记忆的新结论（kind=reflection）。复述、单条换说法、别人的事都不入库。
+//   2. 性格漂移：默认关闭。只有记忆设置里打开后，才写 trait_shift 和 PersonaState。
+//   3. 去重：同 kind 且文字近重复的条目合并（保新删旧，links 并集）。
 //
 // 触发：总结管线尾部（重要性积累到位自然跟上）+ 空闲调度器周期 tick。
 // 兼容：全部走 saveMemoryEntry，字段可选；无任何 LLM 绑定时安静跳过。
@@ -16,11 +15,14 @@ import {
     deleteMemoryEntries,
     getLastConsolidatedTimestamp,
     setLastConsolidatedTimestamp,
+    loadMemoryConfig,
 } from "./memory-storage";
 import { loadApiConfigs, loadBindingConfig, resolveAuxiliaryApiConfig, resolveBinding } from "./settings-storage";
 import { generateEmbedding, resolveEmbeddingModel } from "./memory-embedding";
 import { simpleLLMCall } from "./api-helpers";
-import { applyTraitShift } from "./persona-state";
+import { applyTraitShift, loadPersonaState } from "./persona-state";
+import { loadCharacters } from "./character-storage";
+import { buildMemoryRoster, isForeignMemoryText } from "./group-memory-scope";
 
 /** 固化水位线无活动时多久强制跑一次（毫秒）；有活动时靠总结尾部触发 */
 const MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -29,8 +31,10 @@ const REFLECTION_CANDIDATE_LIMIT = 40;
 /** 反思输出上限 */
 const MAX_REFLECTIONS = 3;
 const MAX_TRAIT_SHIFTS = 2;
-/** 去重判定阈值：归一化文本重叠度 */
-const DEDUPE_SIMILARITY = 0.9;
+/** 去重判定阈值：归一化 bigram Jaccard。换种说法的复述靠覆盖率和包含关系补上。 */
+const DEDUPE_SIMILARITY = 0.62;
+/** 性格漂移至少要跨过的幅度。更小的抖动不写入性格状态。 */
+const MIN_TRAIT_DELTA = 0.25;
 
 const consolidatingSet = new Set<string>();
 
@@ -81,18 +85,22 @@ export async function runConsolidationSweep(
     }
 }
 
-const CONSOLIDATION_PROMPT = `你正在扮演{{char}}的内心独白系统。{{char}}刚闲下来，脑子里的记忆开始沉淀。
+const REFLECTION_PROMPT = `你正在整理{{char}}自己已经记住的事。下面这些记忆是原料，不是要你换种说法再写一遍。
 
-以下是{{char}}近期最重要的记忆（按编号列出）：
 {{memories}}
 
-请站在{{char}}的视角输出（不要输出任何其他内容）：
+只输出真正新的结论：必须同时用到至少两条记忆，而且只能是关于{{char}}自己的经历、感受或关系。
+不要复述任何一条原料，不要把别人的行动写成{{char}}的经历，不要推测性格、依赖或黏人。
+没有这样的新结论时，只输出 NONE。
 
-REFLECTION|<一句话高层洞察：这些记忆放在一起说明了什么>|EVIDENCE:<编号,逗号分隔>
-（最多{{maxReflections}}条；只写真正需要跨多条记忆才能得出的结论，比如"她最近在用忙碌逃避压力"）
+否则每行一条，最多{{maxReflections}}条，不要输出别的内容：
+REFLECTION|<一句话新结论>|EVIDENCE:<至少两个编号,逗号分隔>`;
 
-TRAIT|<性格维度名>|<漂移量-1到1>|<一句话描述变化>|EVIDENCE:<编号,逗号分隔>
-（最多{{maxTraits}}条；仅当记忆明确显示{{char}}的性格/习惯发生了持续变化才写，如"TRAIT|对用户的依赖|0.3|吵架和好后变得更黏人|EVIDENCE:2,5"。没有就别写）`;
+const TRAIT_PROMPT_SECTION = `
+只有多条记忆共同证明{{char}}自己的习惯发生了持续变化时，才可以额外写性格变化。没有就不要写。
+不要根据一件事推测。不要写依赖、黏人、讨好，除非这些记忆的原文多次明确写出这种变化。
+TRAIT|<性格维度>|<漂移量-1到1，绝对值至少${MIN_TRAIT_DELTA}>|<一句话描述{{char}}自己的变化>|EVIDENCE:<至少两个编号>
+最多{{maxTraits}}条。`;
 
 type ParsedReflection = { content: string; evidenceIdx: number[] };
 type ParsedTrait = { key: string; delta: number; desc: string; evidenceIdx: number[] };
@@ -123,23 +131,56 @@ function parseConsolidationOutput(raw: string): { reflections: ParsedReflection[
     return { reflections: reflections.slice(0, MAX_REFLECTIONS), traits: traits.slice(0, MAX_TRAIT_SHIFTS) };
 }
 
-/** 归一化相似度：去标点+小写后的字符 bigram Jaccard；>=0.9 视为重复 */
-function normalizedSimilarity(a: string, b: string): number {
-    const norm = (s: string) => s.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
-    const na = norm(a);
-    const nb = norm(b);
-    if (!na.length || !nb.length) return 0;
-    if (na === nb) return 1;
-    const grams = (s: string) => {
-        const set = new Set<string>();
-        for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
+function normalizeMemoryText(value: string): string {
+    return value.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
+}
+
+function characterBigrams(value: string): Set<string> {
+    const set = new Set<string>();
+    if (value.length < 2) {
+        if (value) set.add(value);
         return set;
-    };
-    const ga = grams(na);
-    const gb = grams(nb);
+    }
+    for (let i = 0; i < value.length - 1; i++) set.add(value.slice(i, i + 2));
+    return set;
+}
+
+function bigramJaccard(a: string, b: string): number {
+    const ga = characterBigrams(a);
+    const gb = characterBigrams(b);
     let inter = 0;
-    for (const g of ga) if (gb.has(g)) inter++;
-    return inter / (ga.size + gb.size - inter);
+    for (const gram of ga) if (gb.has(gram)) inter++;
+    const union = ga.size + gb.size - inter;
+    return union > 0 ? inter / union : 0;
+}
+
+/**
+ * 新反思 / 新性格变化入库前的拦截：相等、互相包含、较高重叠，或短句几乎被另一句盖住。
+ * 不用于删除已有记忆。
+ */
+export function isNearDuplicateMemoryText(a: string, b: string): boolean {
+    const na = normalizeMemoryText(a);
+    const nb = normalizeMemoryText(b);
+    if (!na.length || !nb.length) return false;
+    if (na === nb) return true;
+    const [shorter, longer] = na.length <= nb.length ? [na, nb] : [nb, na];
+    if (shorter.length >= 8 && longer.includes(shorter)) return true;
+    if (bigramJaccard(na, nb) >= DEDUPE_SIMILARITY) return true;
+    const ga = characterBigrams(na);
+    const gb = characterBigrams(nb);
+    let inter = 0;
+    for (const gram of ga) if (gb.has(gram)) inter++;
+    const smaller = Math.min(ga.size, gb.size);
+    return smaller >= 6 && inter / smaller >= 0.8;
+}
+
+/** 已有条目的合并仍要几乎逐字相同，避免把两件不同的事收成一条。 */
+function isSameWording(a: string, b: string): boolean {
+    const na = normalizeMemoryText(a);
+    const nb = normalizeMemoryText(b);
+    if (!na.length || !nb.length) return false;
+    if (na === nb) return true;
+    return bigramJaccard(na, nb) >= 0.9;
 }
 
 export async function runConsolidation(
@@ -172,7 +213,8 @@ export async function runConsolidation(
         .map((e, i) => `[${i + 1}] (重要性${effectiveSalience(e)}) ${e.content}`)
         .join("\n");
 
-    const prompt = CONSOLIDATION_PROMPT
+    const driftEnabled = loadMemoryConfig().autoPersonaDriftEnabled === true;
+    const prompt = `${REFLECTION_PROMPT}${driftEnabled ? TRAIT_PROMPT_SECTION : ""}`
         .replace(/\{\{char\}\}/gi, characterName)
         .replace(/\{\{memories\}\}/gi, memoriesText)
         .replace(/\{\{maxReflections\}\}/gi, String(MAX_REFLECTIONS))
@@ -191,15 +233,22 @@ export async function runConsolidation(
     const embeddingApiConfig = resolveAuxiliaryApiConfig("embeddingApiConfigId");
     const embeddingEnabled = Boolean(embeddingApiConfig && resolveEmbeddingModel(embeddingApiConfig!));
 
-    const existingReflections = all.filter(e => memoryKindOf(e) === "reflection");
+    const existingLongTerm = all.filter(e => e.type === "long_term");
+    const roster = buildMemoryRoster(loadCharacters(), characterId, characterName);
     const evidenceIdsFor = (idx: number[]): string[] =>
         idx.map(i => candidates[i - 1]?.id).filter((id): id is string => Boolean(id));
+    const acceptedReflectionTexts: string[] = [];
 
     for (const ref of parsed.reflections) {
-        // 与已有 reflection 近重复 → 跳过（不删旧条目）
-        if (existingReflections.some(e => normalizedSimilarity(e.content, ref.content) >= DEDUPE_SIMILARITY)) {
-            continue;
-        }
+        // 没有两条以上证据的「洞察」多半是把某一条记忆换了个说法。
+        if (ref.evidenceIdx.length < 2) continue;
+        const evidenceTexts = ref.evidenceIdx
+            .map(index => candidates[index - 1]?.content)
+            .filter((content): content is string => Boolean(content));
+        const duplicateOf = [...existingLongTerm.map(entry => entry.content), ...acceptedReflectionTexts];
+        if (duplicateOf.some(content => isNearDuplicateMemoryText(content, ref.content))) continue;
+        if (evidenceTexts.some(content => isNearDuplicateMemoryText(content, ref.content))) continue;
+        if (isForeignMemoryText(ref.content, roster.selfNames, roster.otherNames)) continue;
         let embedding: number[] | undefined;
         if (embeddingEnabled) {
             try {
@@ -222,11 +271,23 @@ export async function runConsolidation(
             updatedAt: now,
             metadata: { generatedBy: "consolidation" },
         });
-        existingReflections.push({ content: ref.content } as MemoryEntry);
+        acceptedReflectionTexts.push(ref.content);
         reflectionCount++;
     }
 
-    for (const tr of parsed.traits) {
+    const activeTraitKeys = new Set(loadPersonaState(characterId).traits.map(trait => trait.key));
+    const existingTraitTexts = existingLongTerm
+        .filter(entry => memoryKindOf(entry) === "trait_shift")
+        .map(entry => entry.content);
+
+    for (const tr of driftEnabled ? parsed.traits : []) {
+        if (tr.evidenceIdx.length < 2) continue;
+        if (Math.abs(tr.delta) < MIN_TRAIT_DELTA) continue;
+        if (activeTraitKeys.has(tr.key)) continue;
+        const traitText = `性格变化：${tr.desc}（${tr.key} ${tr.delta > 0 ? "+" : ""}${tr.delta}）`;
+        if (existingTraitTexts.some(content => isNearDuplicateMemoryText(content, traitText) || isNearDuplicateMemoryText(content, tr.desc))) {
+            continue;
+        }
         const id = `mem_ts_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         const evidenceIds = evidenceIdsFor(tr.evidenceIdx);
         await saveMemoryEntry({
@@ -235,7 +296,7 @@ export async function runConsolidation(
             sourceApp: "chat",
             type: "long_term",
             kind: "trait_shift",
-            content: `性格变化：${tr.desc}（${tr.key} ${tr.delta > 0 ? "+" : ""}${tr.delta}）`,
+            content: traitText,
             importance: 0.85,
             salience: 8,
             links: evidenceIds,
@@ -251,6 +312,8 @@ export async function runConsolidation(
             change: `${tr.desc}（${tr.key} ${tr.delta > 0 ? "+" : ""}${tr.delta.toFixed(2)}）`,
             sourceEntryId: id,
         });
+        activeTraitKeys.add(tr.key);
+        existingTraitTexts.push(traitText);
         traitCount++;
     }
 
@@ -272,7 +335,7 @@ export async function runConsolidation(
             for (let j = i + 1; j < list.length; j++) {
                 const b = list[j];
                 if (toDelete.has(b.id)) continue;
-                if (normalizedSimilarity(a.content, b.content) < DEDUPE_SIMILARITY) continue;
+                if (!isSameWording(a.content, b.content)) continue;
                 const [keep, drop] = a.createdAt >= b.createdAt ? [a, b] : [b, a];
                 const mergedLinks = Array.from(new Set([...(keep.links ?? []), ...(drop.links ?? [])]));
                 if (mergedLinks.length !== (keep.links?.length ?? 0)) {

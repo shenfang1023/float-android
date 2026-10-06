@@ -1,8 +1,8 @@
 import { loadCharacters } from "./character-storage";
 import type { Character } from "./character-types";
 import { ChatEngineError, sendLLMRequest } from "./chat-engine";
-import { buildCalendarScheduleMarker } from "./calendar-storage";
-import { getWeekStartIso } from "./calendar-utils";
+import { buildCalendarScheduleMarker, clockForCalendarOwner } from "./calendar-storage";
+
 import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { loadMemoryConfig } from "./memory-storage";
@@ -108,7 +108,7 @@ export async function buildGameRolePackage(input: {
     appId: GAME_PROMPT_APP_ID,
     appTags: GAME_PROMPT_TAGS,
     scheduleSummary: input.mode === "full"
-      ? buildCalendarScheduleMarker("character", input.characterId, getWeekStartIso(new Date()))
+      ? buildCalendarScheduleMarker("character", input.characterId, clockForCalendarOwner("character", input.characterId).weekStartIso)
       : "",
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
     longTermMemories: memories ? formatLongTermMemories(memories) : "",

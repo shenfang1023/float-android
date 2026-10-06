@@ -17,8 +17,8 @@ import { loadMemoryConfig } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
-import { buildCalendarScheduleMarker } from "./calendar-storage";
-import { getWeekStartIso } from "./calendar-utils";
+import { buildCalendarScheduleMarker, clockForCalendarOwner } from "./calendar-storage";
+
 
 // ── Resolve configs (same pattern as story-engine) ──
 
@@ -77,7 +77,7 @@ async function buildDwellingMessages(
         userIdentity,
         appId: "dwelling",
         appTags,
-        scheduleSummary: buildCalendarScheduleMarker("character", characterId, getWeekStartIso(new Date())),
+        scheduleSummary: buildCalendarScheduleMarker("character", characterId, clockForCalendarOwner("character", characterId).weekStartIso),
         coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
         longTermMemories: memories ? formatLongTermMemories(memories) : "",
         worldBookActivationContext: wbActivationContext,

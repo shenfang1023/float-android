@@ -60,6 +60,8 @@ function buildMonths(todayIso: string): MonthBlock[] {
 
 export function CalendarMonthPage({
   todayIso,
+  zoneCity,
+  localTimeLabel,
   itemsByDate,
   cycleMap,
   ownerStrip,
@@ -68,6 +70,9 @@ export function CalendarMonthPage({
   onOpenTheme,
 }: {
   todayIso: string;
+  /** City of the selected character's zone, when it differs from the phone. */
+  zoneCity?: string;
+  localTimeLabel?: string;
   itemsByDate: Map<string, CalendarScheduleItem[]>;
   cycleMap: Map<string, MenstrualDayState> | null;
   ownerStrip: ReactNode;
@@ -208,8 +213,13 @@ export function CalendarMonthPage({
       <div className="calendar-bottom-fade" aria-hidden="true" />
 
       <div className="calendar-float-bar">
-        <button type="button" className="calendar-pill-btn" onClick={() => scrollToYm(todayYm, true)}>
-          今天
+        <button
+          type="button"
+          className="calendar-pill-btn"
+          onClick={() => scrollToYm(todayYm, true)}
+          title={zoneCity && localTimeLabel ? `${zoneCity} ${localTimeLabel}` : undefined}
+        >
+          {zoneCity ? `今天 · ${zoneCity}` : "今天"}
         </button>
       </div>
     </div>

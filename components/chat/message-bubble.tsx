@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, useMemo, memo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, memo, useId } from "react";
 import { findCustomStickerByName, resolveCustomStickerUrl } from "@/lib/custom-sticker-storage";
 import { isMediaStoreRef, loadMediaObjectUrl } from "@/lib/media-cache-storage";
 import { getChatImageFromIndexedDB } from "@/lib/chat-asset-storage";
@@ -28,6 +28,7 @@ import { toCustomAppIconId } from "@/lib/custom-app-types";
 import { ChatPluginSlot } from "@/components/chat/chat-plugin-slot";
 import { CustomStatusFrame } from "@/components/chat/custom-status-frame";
 import { CHAT_PLUGIN_SLOTS_CHANGED_EVENT, getChatPluginRuntime } from "@/lib/chat-plugin-runtime";
+import { anchorGeneratedCss, isHostDocumentHtml, scopeGeneratedCss } from "@/lib/css-scoper";
 
 interface MessageBubbleProps {
     msg: ChatMessage;
@@ -254,10 +255,12 @@ function FriendRequestBubble({
 
 function extractStyles(text: string): { styles: string; body: string } {
     const styleBlocks: string[] = [];
-    const body = text.replace(/<style[^>]*>([\s\S]*?)<\/style>/gi, (_, css) => {
+    let body = text.replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, (_, css: string) => {
         styleBlocks.push(css);
         return "";
     });
+    // A leftover opening tag would let rehype inject a stylesheet into the phone page.
+    body = body.replace(/<style\b[^>]*>/gi, "").replace(/<\/style>/gi, "");
     return { styles: styleBlocks.join("\n"), body };
 }
 
@@ -297,11 +300,7 @@ export function isStandaloneHtmlPreviewContent(content: string): boolean {
     if (!cleaned) return false;
 
     const strippedCodeBlocks = cleaned.replace(/```[\s\S]*?```/g, "").replace(/`[^`]+`/g, "");
-    if (/^\s*</.test(strippedCodeBlocks)
-        && /<script\b[\s\S]*?<\/script>/i.test(strippedCodeBlocks)
-        && /<style\b[\s\S]*?<\/style>/i.test(strippedCodeBlocks)) {
-        return true;
-    }
+    if (isHostDocumentHtml(strippedCodeBlocks)) return true;
 
     const segments = splitChatContent(cleaned);
     return segments.length === 1 && segments[0].type === "html";
@@ -562,7 +561,14 @@ const MARKDOWN_COMPONENTS = {
     prologue: ({ node, ...props }: any) => <div className="rm-prologue" {...props} />,
     profile: ({ node, ...props }: any) => <div className="rm-profile" {...props} />,
     branches: ({ node, ...props }: any) => <div className="rm-branches" {...props} />,
-    content: ({ node, ...props }: any) => <div className="rm-content" {...props} />
+    content: ({ node, ...props }: any) => <div className="rm-content" {...props} />,
+    // Closed <style> blocks are extracted and scoped. Anything rehype still
+    // parses as a style element must not land in the host document.
+    style: () => null,
+    link: ({ node, rel, ...props }: any) => {
+        if (typeof rel === "string" && /(^|\s)stylesheet(\s|$)/i.test(rel)) return null;
+        return <link rel={rel} {...props} />;
+    },
 } as any;
 
 // ── 文本预处理结果缓存 ──
@@ -611,9 +617,7 @@ function prepareMarkdownContentUncached(content: string): PreparedMarkdown | nul
     const payUrls = extractPaySchemeUrls(cleaned);
 
     const strippedCodeBlocks = cleaned.replace(/```[\s\S]*?```/g, "").replace(/`[^`]+`/g, "");
-    if (/^\s*</.test(strippedCodeBlocks)
-        && /<script\b[\s\S]*?<\/script>/i.test(strippedCodeBlocks)
-        && /<style\b[\s\S]*?<\/style>/i.test(strippedCodeBlocks)) {
+    if (isHostDocumentHtml(strippedCodeBlocks)) {
         return { cleaned, payUrls, htmlPreviewOnly: true, segments: null, simpleStyles: "", simpleMd: "" };
     }
 
@@ -622,7 +626,8 @@ function prepareMarkdownContentUncached(content: string): PreparedMarkdown | nul
 
     if (!hasHtmlBlocks) {
         const { styles, body } = extractStyles(cleaned);
-        const simpleMd = wrapQuotedDialogue(linkifyBareUrls(stripPaySchemeUrls(body.trim())));
+        const safeBody = mapMarkdownOutsideCode(body, anchorGeneratedCss);
+        const simpleMd = wrapQuotedDialogue(linkifyBareUrls(stripPaySchemeUrls(safeBody.trim())));
         if (!simpleMd && !styles && payUrls.length === 0) return null;
         return { cleaned, payUrls, htmlPreviewOnly: false, segments: null, simpleStyles: styles, simpleMd };
     }
@@ -630,7 +635,8 @@ function prepareMarkdownContentUncached(content: string): PreparedMarkdown | nul
     const preparedSegs: PreparedMdSegment[] = segments.map(seg => {
         if (seg.type === "html") return { type: "html", content: seg.content };
         const { styles, body } = extractStyles(seg.content);
-        return { type: "md", styles, mdContent: wrapQuotedDialogue(linkifyBareUrls(stripPaySchemeUrls(body.trim()))) };
+        const safeBody = mapMarkdownOutsideCode(body, anchorGeneratedCss);
+        return { type: "md", styles, mdContent: wrapQuotedDialogue(linkifyBareUrls(stripPaySchemeUrls(safeBody.trim()))) };
     });
     return { cleaned, payUrls, htmlPreviewOnly: false, segments: preparedSegs, simpleStyles: "", simpleMd: "" };
 }
@@ -645,6 +651,9 @@ function MarkdownTextContent({
     htmlFrameVariant?: ChatHtmlFrameVariant;
 }) {
     const containerRef = useRef<HTMLDivElement>(null);
+    const reactId = useId();
+    const scopeClass = `chat-bubble-css-${reactId.replace(/[^A-Za-z0-9_-]/g, "")}`;
+    const scopeSelector = `.${scopeClass}`;
 
     // Action delegate for data-action clicks in inline HTML
     useEffect(() => {
@@ -673,9 +682,10 @@ function MarkdownTextContent({
     }
 
     if (!prepared.segments) {
+        const scopedStyles = prepared.simpleStyles ? scopeGeneratedCss(prepared.simpleStyles, scopeSelector) : "";
         return (
-            <div className="chat-markdown hide-scrollbar break-words" ref={containerRef}>
-                {prepared.simpleStyles && <style dangerouslySetInnerHTML={{ __html: prepared.simpleStyles }} />}
+            <div className={`chat-markdown hide-scrollbar break-words ${scopeClass}`} ref={containerRef}>
+                {scopedStyles && <style dangerouslySetInnerHTML={{ __html: scopedStyles }} />}
                 {prepared.simpleMd && (
                     <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} rehypePlugins={[rehypeRaw]} components={MARKDOWN_COMPONENTS}>
                         {prepared.simpleMd}
@@ -688,14 +698,15 @@ function MarkdownTextContent({
 
     // Mixed path: markdown + html blocks
     return (
-        <div className="chat-markdown hide-scrollbar break-words" ref={containerRef}>
+        <div className={`chat-markdown hide-scrollbar break-words ${scopeClass}`} ref={containerRef}>
             {prepared.segments.map((seg, i) => {
                 if (seg.type === "html") {
                     return <HtmlPreviewCard key={`html-${i}`} html={seg.content} onActionSelect={onActionSelect} htmlFrameVariant={htmlFrameVariant} />;
                 }
+                const scopedStyles = seg.styles ? scopeGeneratedCss(seg.styles, scopeSelector) : "";
                 return (
                     <div key={`md-${i}`}>
-                        {seg.styles && <style dangerouslySetInnerHTML={{ __html: seg.styles }} />}
+                        {scopedStyles && <style dangerouslySetInnerHTML={{ __html: scopedStyles }} />}
                         {seg.mdContent && (
                             <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} rehypePlugins={[rehypeRaw]} components={MARKDOWN_COMPONENTS}>
                                 {seg.mdContent}

@@ -33,6 +33,7 @@ import {
 import { flattenCompletionResult, generateChatCompletion } from "./chat-engine";
 import { generateGroupRawCompletion } from "./group-chat-engine";
 import {
+  clockForCalendarOwner,
   deleteCalendarScheduleItem,
   loadCalendarWeekPlan,
   loadOwnerCalendarPlans,
@@ -40,7 +41,8 @@ import {
   upsertCalendarScheduleItem,
 } from "./calendar-storage";
 import type { CalendarOwnerType, CalendarScheduleItem } from "./calendar-types";
-import { formatIsoDate, getWeekStartIso, normalizeTime } from "./calendar-utils";
+import { normalizeTime } from "./calendar-utils";
+import { weekStartFromIsoDate } from "./character-time";
 import { simpleLLMCall } from "./api-helpers";
 import { httpFetch, isNativeHttpAvailable } from "./native-http";
 import { generateEmbedding } from "./memory-embedding";
@@ -343,16 +345,16 @@ function resolveCalendarOwner(record: Record<string, unknown>): { ownerType: Cal
   return { ownerType, ownerId };
 }
 
-function normalizeWeekStart(record: Record<string, unknown>): string {
+function normalizeWeekStart(record: Record<string, unknown>, ownerType: CalendarOwnerType, ownerId: string): string {
   const explicit = cleanText(record.weekStart, 40);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(explicit)) return explicit;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(explicit)) return weekStartFromIsoDate(explicit);
   const dateText = cleanText(record.date, 40);
-  const date = dateText ? new Date(`${dateText}T00:00:00`) : new Date();
-  return getWeekStartIso(Number.isNaN(date.getTime()) ? new Date() : date);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateText)) return weekStartFromIsoDate(dateText);
+  return clockForCalendarOwner(ownerType, ownerId).weekStartIso;
 }
 
-function normalizeCalendarItem(record: Record<string, unknown>, index = 0): Omit<CalendarScheduleItem, "id" | "weekday" | "colorKey" | "createdAt" | "updatedAt"> & Partial<CalendarScheduleItem> {
-  const date = cleanText(record.date, 40) || formatIsoDate(new Date());
+function normalizeCalendarItem(record: Record<string, unknown>, ownerType: CalendarOwnerType, ownerId: string, index = 0): Omit<CalendarScheduleItem, "id" | "weekday" | "colorKey" | "createdAt" | "updatedAt"> & Partial<CalendarScheduleItem> {
+  const date = cleanText(record.date, 40) || clockForCalendarOwner(ownerType, ownerId).dateIso;
   const startTime = normalizeTime(cleanText(record.startTime ?? record.start, 20)) ?? "";
   const endTime = normalizeTime(cleanText(record.endTime ?? record.end, 20)) ?? "";
   const title = cleanText(record.title ?? record.name, 120);
@@ -1222,7 +1224,7 @@ export async function cloneCustomAppVoice(app: InstalledCustomApp, record: Recor
 
 export function readCustomAppCalendar(record: Record<string, unknown>): Record<string, unknown> {
   const { ownerType, ownerId } = resolveCalendarOwner(record);
-  const weekStart = normalizeWeekStart(record);
+  const weekStart = normalizeWeekStart(record, ownerType, ownerId);
   const plan = loadCalendarWeekPlan(ownerType, ownerId, weekStart);
   return {
     ownerType,
@@ -1236,7 +1238,7 @@ export function readCustomAppCalendar(record: Record<string, unknown>): Record<s
 export function writeCustomAppCalendar(record: Record<string, unknown>): Record<string, unknown> {
   const operation = cleanText(record.operation ?? record.action, 40) || (record.items ? "replace" : "upsert");
   const { ownerType, ownerId } = resolveCalendarOwner(record);
-  const weekStart = normalizeWeekStart(record);
+  const weekStart = normalizeWeekStart(record, ownerType, ownerId);
   if (operation === "delete") {
     const itemId = cleanText(record.itemId ?? record.id, 120);
     if (!itemId) throw new Error("calendar.delete 需要 itemId。");
@@ -1244,11 +1246,11 @@ export function writeCustomAppCalendar(record: Record<string, unknown>): Record<
   }
   if (operation === "replace") {
     const rawItems = Array.isArray(record.items) ? record.items : [];
-    const items = rawItems.map((item, index) => normalizeCalendarItem(asRecord(item), index));
+    const items = rawItems.map((item, index) => normalizeCalendarItem(asRecord(item), ownerType, ownerId, index));
     return { ok: true, plan: replaceCalendarWeekItems(ownerType, ownerId, weekStart, items as CalendarScheduleItem[]) };
   }
   const itemRecord = asRecord(record.item);
-  const item = normalizeCalendarItem(Object.keys(itemRecord).length > 0 ? itemRecord : record);
+  const item = normalizeCalendarItem(Object.keys(itemRecord).length > 0 ? itemRecord : record, ownerType, ownerId);
   return { ok: true, plan: upsertCalendarScheduleItem(ownerType, ownerId, weekStart, item) };
 }
 

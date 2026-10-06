@@ -13,8 +13,8 @@ import { retrieveMemoriesForPrompt, retrieveCoreMemoriesForPrompt } from "./memo
 import { formatLongTermMemories, formatCoreMemories } from "./memory-injector";
 import { loadMemoryConfig } from "./memory-storage";
 import { prepareShortTermContext } from "./short-term-assembler";
-import { buildCalendarScheduleMarker } from "./calendar-storage";
-import { getWeekStartIso } from "./calendar-utils";
+import { buildCalendarScheduleMarker, clockForCalendarOwner } from "./calendar-storage";
+
 import { estimateTokens } from "./token-counter";
 import { loadAdventureInteractionConfig, loadDMTokenConfig } from "./map-storage";
 import { DEFAULT_ADVENTURE_BILINGUAL_PROMPT, resolveBilingualPrompt } from "./bilingual-prompt-defaults";
@@ -1045,7 +1045,7 @@ async function buildCompanionDeclarePromptPayload(
   ]);
   const longTermMemories = memResults ? formatLongTermMemories(memResults) : "";
   const coreMemories = coreResults ? formatCoreMemories(coreResults) : "";
-  const scheduleSummary = buildCalendarScheduleMarker("character", characterId, getWeekStartIso(new Date()));
+  const scheduleSummary = buildCalendarScheduleMarker("character", characterId, clockForCalendarOwner("character", characterId).weekStartIso);
 
   const llmMessages = assemblePromptPayload({
     character, history: truncatedHistory, preset, worldBooks, regexes, userIdentity, appId: "adventure",

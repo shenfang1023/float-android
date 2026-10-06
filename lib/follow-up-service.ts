@@ -53,8 +53,9 @@ import {
     saveTimedWakeSchedule,
     type TimedWakeSchedule,
 } from "./timed-wake-storage";
-import { loadCalendarWeekPlan } from "./calendar-storage";
-import { formatIsoDate, getWeekStartIso, timeToMinutes } from "./calendar-utils";
+import { clockForCalendarOwner, loadCalendarWeekPlan } from "./calendar-storage";
+import { timeToMinutes } from "./calendar-utils";
+import { getSystemTimeZone, getZonedClock, normalizeTimeZone, zonedDateTimeToEpoch } from "./character-time";
 import { loadDailyWorldPlan, saveDailyWorldPlan } from "./daily-world-storage";
 import { triggerImmediatePost } from "./moments-engine";
 
@@ -65,34 +66,48 @@ let lastPropagationPollAt = 0;
 /** 传播第二步：互动事件结束后，参与者角色"有感而发"发条朋友圈。
  *  发帖管线本身已注入今日世界 marker（含该互动+结果），内容自然围绕事件发散。
  *  每个互动最多触发一次（generatedContentRefs 记录），安静时段照常受门控。 */
+function zoneOfParticipant(characterId: string, chars: ReturnType<typeof loadCharacters>): string {
+    if (characterId === "__user__") return getSystemTimeZone();
+    return normalizeTimeZone(chars.find(character => character.id === characterId)?.timeZone) || getSystemTimeZone();
+}
+
 function pollInteractionPropagation(now: number) {
     if (now - lastPropagationPollAt < INTERACTION_PROPAGATION_INTERVAL_MS) return;
     lastPropagationPollAt = now;
 
-    const today = formatIsoDate(new Date(now));
-    const plan = loadDailyWorldPlan(today);
-    if (!plan) return;
+    const at = new Date(now);
+    const chars = loadCharacters();
+    const dates = new Set<string>([getZonedClock(null, at).dateIso]);
+    for (const character of chars) dates.add(getZonedClock(character.timeZone, at).dateIso);
 
-    let dirty = false;
-    for (const it of plan.interactions) {
-        if (!it.endTime) continue;
-        const [eh, em] = it.endTime.split(":").map(Number);
-        if (Number.isNaN(eh) || Number.isNaN(em)) continue;
-        const endAt = new Date(now);
-        endAt.setHours(eh, em, 0, 0);
-        if (now < endAt.getTime() + INTERACTION_PROPAGATION_GRACE_MS) continue;
-        if (it.generatedContentRefs?.length) continue;
+    for (const today of dates) {
+        const plan = loadDailyWorldPlan(today);
+        if (!plan) continue;
 
-        const target = it.participantIds.find(id => id !== "__user__");
-        if (!target) continue;
-        if (isWithinQuietHours(now, target)) continue;
+        let dirty = false;
+        for (const it of plan.interactions) {
+            if (!it.endTime || !/^\d{1,2}:\d{2}$/.test(it.endTime)) continue;
+            const target = it.participantIds.find(id => id !== "__user__");
+            if (!target) continue;
+            const zones = new Set(it.participantIds.map(id => zoneOfParticipant(id, chars)));
+            // One shared HH:MM cannot be two zones at once. Same-zone events still fire.
+            if (zones.size > 1) continue;
+            const targetZone = zoneOfParticipant(target, chars);
+            if (plan.date !== getZonedClock(targetZone, at).dateIso) continue;
+            const [eh, em] = it.endTime.split(":").map(Number);
+            if (Number.isNaN(eh) || Number.isNaN(em)) continue;
+            const endAt = zonedDateTimeToEpoch(plan.date, eh * 60 + em, targetZone);
+            if (!Number.isFinite(endAt) || now < endAt + INTERACTION_PROPAGATION_GRACE_MS) continue;
+            if (it.generatedContentRefs?.length) continue;
+            if (isWithinQuietHours(now, target)) continue;
 
-        it.generatedContentRefs = [`moment:${target}`];
-        dirty = true;
-        console.log(`[DailyWorld] interaction ended → moment post for ${target}: ${it.what}`);
-        triggerImmediatePost(target);
+            it.generatedContentRefs = [`moment:${target}`];
+            dirty = true;
+            console.log(`[DailyWorld] interaction ended → moment post for ${target}: ${it.what}`);
+            triggerImmediatePost(target);
+        }
+        if (dirty) saveDailyWorldPlan(plan);
     }
-    if (dirty) saveDailyWorldPlan(plan);
 }
 
 /** 日程忙碌门控：角色当前日程 busyLevel>=2（上课/开会/深度专注）时，
@@ -100,21 +115,19 @@ function pollInteractionPropagation(now: number) {
  *  用户主动发消息不受影响（角色会正常回复并在对话里体现当前活动）。 */
 function busyDeferUntil(characterId: string | undefined, nowMs: number): number | null {
     if (!characterId) return null;
-    const now = new Date(nowMs);
-    const date = formatIsoDate(now);
-    const plan = loadCalendarWeekPlan("character", characterId, getWeekStartIso(now));
+    const clock = clockForCalendarOwner("character", characterId, new Date(nowMs));
+    const plan = loadCalendarWeekPlan("character", characterId, clock.weekStartIso);
     if (!plan) return null;
-    const curMin = now.getHours() * 60 + now.getMinutes();
     for (const item of plan.items) {
-        if (item.date !== date) continue;
+        if (item.date !== clock.dateIso) continue;
         if ((item.busyLevel ?? 0) < 2) continue;
         const start = timeToMinutes(item.startTime);
         const end = timeToMinutes(item.endTime);
         if (Number.isNaN(start) || Number.isNaN(end)) continue;
-        if (start <= curMin && curMin < end) {
-            const endAt = new Date(nowMs);
-            endAt.setHours(Math.floor(end / 60), end % 60, 0, 0);
-            return endAt.getTime() + 60_000;
+        if (start <= clock.minutes && clock.minutes < end) {
+            const endAt = zonedDateTimeToEpoch(clock.dateIso, end, clock.timeZone);
+            if (!Number.isFinite(endAt)) return null;
+            return endAt + 60_000;
         }
     }
     return null;

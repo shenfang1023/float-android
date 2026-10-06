@@ -14,6 +14,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
 
@@ -26,6 +27,7 @@ import androidx.core.app.NotificationCompat;
 public class GenerationKeepAliveService extends Service {
 
     public static final String EXTRA_LABEL = "label";
+    private static final String TAG = "GenerationKeepAlive";
 
     private static final String CHANNEL_ID = "generation_keepalive";
     private static final int NOTIFICATION_ID = 4701;
@@ -41,37 +43,51 @@ public class GenerationKeepAliveService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-        if (pm != null) {
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "float:generation");
-            wakeLock.setReferenceCounted(false);
-        }
-        WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-        if (wm != null) {
-            int mode = Build.VERSION.SDK_INT >= 29
-                    ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                    : WifiManager.WIFI_MODE_FULL;
-            wifiLock = wm.createWifiLock(mode, "float:generation");
-            wifiLock.setReferenceCounted(false);
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "float:generation");
+                wakeLock.setReferenceCounted(false);
+            }
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                int mode = Build.VERSION.SDK_INT >= 29
+                        ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                        : WifiManager.WIFI_MODE_FULL;
+                wifiLock = wm.createWifiLock(mode, "float:generation");
+                wifiLock.setReferenceCounted(false);
+            }
+        } catch (RuntimeException error) {
+            // 锁拿不到就只保前台服务。这里抛出去会在生成开始的瞬间把进程打死，页面留下白屏。
+            Log.e(TAG, "keep-alive locks unavailable", error);
+            wakeLock = null;
+            wifiLock = null;
         }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        createChannel();
-        String label = intent != null ? intent.getStringExtra(EXTRA_LABEL) : null;
-        Notification notification = buildNotification(label);
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
-        } else {
-            startForeground(NOTIFICATION_ID, notification);
+        try {
+            createChannel();
+            String label = intent != null ? intent.getStringExtra(EXTRA_LABEL) : null;
+            Notification notification = buildNotification(label);
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+            if (wakeLock != null && !wakeLock.isHeld()) wakeLock.acquire(FAILSAFE_MS);
+            if (wifiLock != null && !wifiLock.isHeld()) wifiLock.acquire();
+            // 双保险：即使唤醒锁超时自动释放了，服务本身也别一直挂着
+            handler.removeCallbacks(failsafeStop);
+            handler.postDelayed(failsafeStop, FAILSAFE_MS + 60_000);
+            return START_NOT_STICKY;
+        } catch (RuntimeException error) {
+            // startForeground / 唤醒锁失败时必须自己停掉，否则系统会因前台服务没起来而杀进程。
+            Log.e(TAG, "keep-alive foreground start failed", error);
+            stopSelf();
+            return START_NOT_STICKY;
         }
-        if (wakeLock != null && !wakeLock.isHeld()) wakeLock.acquire(FAILSAFE_MS);
-        if (wifiLock != null && !wifiLock.isHeld()) wifiLock.acquire();
-        // 双保险：即使唤醒锁超时自动释放了，服务本身也别一直挂着
-        handler.removeCallbacks(failsafeStop);
-        handler.postDelayed(failsafeStop, FAILSAFE_MS + 60_000);
-        return START_NOT_STICKY;
     }
 
     private void createChannel() {
@@ -106,7 +122,11 @@ public class GenerationKeepAliveService extends Service {
         handler.removeCallbacks(failsafeStop);
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
-        stopForeground(true);
+        try {
+            stopForeground(true);
+        } catch (RuntimeException error) {
+            Log.e(TAG, "stopForeground failed", error);
+        }
         super.onDestroy();
     }
 

@@ -45,8 +45,8 @@ import { assemblePromptPayload, type LLMMessage, type AssemblerInput } from "./l
 import type { RegexConfig } from "./settings-types";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { parseActionTags, dispatchActions } from "./action-parser";
-import { buildCalendarScheduleMarker } from "./calendar-storage";
-import { formatIsoDate, getWeekStartIso } from "./calendar-utils";
+import { buildCalendarScheduleMarker, clockForCalendarOwner } from "./calendar-storage";
+
 import { buildDailyWorldMarker } from "./daily-world-storage";
 import { getCustomStickerNames, getCustomStickerExample } from "./custom-sticker-storage";
 import { previewMessagesForApi, sendLLMRequest } from "./chat-engine";
@@ -268,15 +268,16 @@ async function resolveAssemblerInput(
     const { recentBlocks, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "moments");
 
     // Calendar schedule (NPC doesn't get character's schedule)
-    const dailyWorld = isNPC ? undefined : buildDailyWorldMarker(
+    const scheduleClock = isNPC ? null : clockForCalendarOwner("character", characterId);
+    const dailyWorld = scheduleClock ? buildDailyWorldMarker(
         characterId,
-        formatIsoDate(new Date()),
+        scheduleClock.dateIso,
         (id) => loadCharacters().find(c => c.id === id)?.name ?? id,
-    );
-    const scheduleSummary = isNPC ? undefined : [
-        buildCalendarScheduleMarker("character", characterId, getWeekStartIso(new Date())),
+    ) : undefined;
+    const scheduleSummary = scheduleClock ? [
+        buildCalendarScheduleMarker("character", characterId, scheduleClock.weekStartIso),
         dailyWorld,
-    ].filter(Boolean).join("\n");
+    ].filter(Boolean).join("\n") : undefined;
 
     const input: AssemblerInput = {
         character,

@@ -1,0 +1,77 @@
+# Manual debug APK for people who fork this repo.
+# The artifact stays on the fork that clicked Run workflow. This workflow
+# does not publish a GitHub Release and does not close Issues.
+
+name: Build Android Shell APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NODE_OPTIONS: "--max-old-space-size=6144"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # v3 defaults to "tools platform-tools". Google no longer serves
+          # the deprecated "tools" package, so sdkmanager exits 1.
+          packages: platform-tools
+
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Build web bundle and sync Android
+        run: npm run build:apk
+
+      - name: Assemble release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon -Dorg.gradle.jvmargs=-Xmx4g
+
+      - name: Name release APK
+        id: apk
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/versionName[[:space:]]+"/ { print $2; exit }' android/app/build.gradle)
+          if [ -z "$version" ]; then
+            echo "versionName not found in android/app/build.gradle" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk "dist/float-android-${version}.apk"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "file=dist/float-android-${version}.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: float-android-${{ steps.apk.outputs.version }}
+          path: ${{ steps.apk.outputs.file }}
+          if-no-files-found: error
+          retention-days: 14

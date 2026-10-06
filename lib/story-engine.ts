@@ -15,8 +15,8 @@ import { loadMemoryConfig } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
-import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
-import { getWeekStartIso } from "./calendar-utils";
+import { buildCalendarScheduleMarker, clockForCalendarOwner, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
+
 import { parseStoryResponse } from "./story-parser";
 import { STORY_PARSER_VERSION } from "./story-parser";
 import { loadStoryMessages, replaceStoryMessages, resolveActiveStorySchemes, type StoryCharacterSettings, type StoryMessage } from "./story-storage";
@@ -299,7 +299,7 @@ async function buildStoryPromptMessages(
     regexes,
     userIdentity,
     appId: "story",
-    scheduleSummary: buildCalendarScheduleMarker("character", characterId, getWeekStartIso(now)),
+    scheduleSummary: buildCalendarScheduleMarker("character", characterId, clockForCalendarOwner("character", characterId, now).weekStartIso),
     currentSchedule: getCurrentCalendarScheduleForPrompt("character", characterId, now),
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
     longTermMemories: memories ? formatLongTermMemories(memories) : "",

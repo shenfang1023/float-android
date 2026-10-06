@@ -67,7 +67,7 @@ type PhoneQaAppProps = {
 const SUGGESTIONS = [
   "怎么添加我的 API？",
   "聊天没有回复怎么排查？",
-  "怎么部署到 Netlify / Vercel？",
+  "怎么部署网页版或安装包？",
   "数据存在哪里，怎么备份？",
   "帮我写个小游戏装到本机",
 ];

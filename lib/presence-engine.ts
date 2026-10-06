@@ -1,6 +1,6 @@
-import { loadCalendarWeekPlan } from "./calendar-storage";
+import { clockForCalendarOwner, loadCalendarWeekPlan } from "./calendar-storage";
 import type { CalendarScheduleItem } from "./calendar-types";
-import { formatIsoDate, getWeekStartIso, sortScheduleItems, timeToMinutes } from "./calendar-utils";
+import { sortScheduleItems, timeToMinutes } from "./calendar-utils";
 import {
   getCharFindMyConfig,
   getHomePlace,
@@ -29,9 +29,10 @@ export type CharacterPresence = {
 
 /** 取角色当前时段的日程条目（与 getCurrentCalendarScheduleForPrompt 同口径，但返回原始 item） */
 export function getCurrentScheduleItem(characterId: string, now = new Date()): CalendarScheduleItem | null {
-  const date = formatIsoDate(now);
-  const weekStart = getWeekStartIso(now);
-  const currentMinute = now.getHours() * 60 + now.getMinutes();
+  const clock = clockForCalendarOwner("character", characterId, now);
+  const date = clock.dateIso;
+  const weekStart = clock.weekStartIso;
+  const currentMinute = clock.minutes;
   const plan = loadCalendarWeekPlan("character", characterId, weekStart);
   if (!plan) return null;
   return sortScheduleItems(plan.items).find(item => {

@@ -39,10 +39,10 @@ import {
 } from "./chat-engine";
 import type { CustomAppPromptProfile } from "./custom-app-types";
 import { isNeteaseConfigured } from "./music-service";
-import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
+import { buildCalendarScheduleMarker, clockForCalendarOwner, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
 import { formatPresenceForPrompt, resolveCharacterPresence, type CharacterPresence } from "./presence-engine";
 import { buildDailyWorldMarker } from "./daily-world-storage";
-import { formatIsoDate, getWeekStartIso } from "./calendar-utils";
+
 import {
     resolveBinding,
     loadBindingConfig,
@@ -69,6 +69,7 @@ import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { maybeRunSummarization } from "./memory-summarizer";
+import { groupMessageInvolvesCharacter, textMentionsCharacter } from "./group-memory-scope";
 import { prepareShortTermContext, prepareGroupShortTermContext } from "./short-term-assembler";
 import { collapseRepeatedAssistantMessages } from "./prompt-dedupe";
 import { parseActionTags, dispatchActions } from "./action-parser";
@@ -136,41 +137,58 @@ export function annotateGroupHistory(
     });
 }
 
+function matchGroupSpeakerPrefix(
+    line: string,
+    knownNamesLongestFirst: string[],
+): { name: string; rest: string } | null {
+    // 方括号 / 书名号括号里的名字都切段，未知名字稍后整段丢掉，避免粘进上一个人的气泡。
+    // 中文模型常把半角冒号写成全角，两种都认。
+    const wrapped = line.match(/^(?:\[([^\]\n]{1,32})\]|【([^】\n]{1,32})】)\s*[:：]\s*/);
+    if (wrapped) {
+        const name = (wrapped[1] ?? wrapped[2] ?? "").trim();
+        if (!name) return null;
+        return { name, rest: line.slice(wrapped[0].length) };
+    }
+    const trimmed = line.trimStart();
+    for (const name of knownNamesLongestFirst) {
+        if (!trimmed.startsWith(name)) continue;
+        const colon = trimmed.slice(name.length).match(/^\s*[:：]\s*/);
+        if (!colon) continue;
+        return { name, rest: trimmed.slice(name.length + colon[0].length) };
+    }
+    return null;
+}
+
 /**
  * Parse the LLM output in [角色名]: format into per-character results.
- * Falls back: if no known name prefix found, assigns entire output to the first member.
+ * 多人回合如果完全没有说话人标记，不再把整段挂到成员列表的第一个人身上。
+ * 只有群里仅此一个角色时，才把无前缀的整段算作他的发言。
  */
 export function parseGroupChatResponse(
     text: string,
     nameToId: Map<string, string>,
 ): { characterId: string; characterName: string; responseText: string }[] {
-    const names = [...nameToId.keys()];
-    // 通用切分：任何 [名字]: 行都开启新段落——包括被踢成员、冒用的用户名或
-    // 幻觉名字。未知名字的段落随后被 nameToId 校验整段丢弃，防止其内容以
-    // 字面文本粘进上一个合法角色的气泡（或经兜底逻辑错挂到第一个成员头上）。
-    const pattern = /^\[([^\]\n]{1,32})\]:\s*/;
+    const names = [...nameToId.keys()].sort((a, b) => b.length - a.length || a.localeCompare(b));
 
     const segments: { name: string; lines: string[] }[] = [];
     let currentName: string | null = null;
 
     for (const line of text.split("\n")) {
-        const match = line.match(pattern);
+        const match = matchGroupSpeakerPrefix(line, names);
         if (match) {
-            const name = match[1].trim();
-            const rest = line.slice(match[0].length);
-            currentName = name;
-            segments.push({ name, lines: [rest] });
+            currentName = match.name;
+            segments.push({ name: match.name, lines: [match.rest] });
         } else if (currentName && segments.length > 0) {
             segments[segments.length - 1].lines.push(line);
         }
     }
 
     if (segments.length === 0) {
-        // Fallback: no [Name]: prefix found — assign to first member
-        const firstName = names[0];
-        if (!firstName) return [];
-        const charId = nameToId.get(firstName)!;
-        return [{ characterId: charId, characterName: firstName, responseText: text.trim() }];
+        if (names.length !== 1) return [];
+        const onlyName = names[0];
+        const charId = nameToId.get(onlyName);
+        if (!onlyName || !charId || !text.trim()) return [];
+        return [{ characterId: charId, characterName: onlyName, responseText: text.trim() }];
     }
 
     const rawResults: { characterId: string; characterName: string; responseText: string }[] = [];
@@ -255,25 +273,49 @@ export function buildEditableGroupRoundText(
 }
 
 function scheduleGroupMemorySummarization(
-    participantIds: string[],
+    session: ChatSession,
     chars: ReturnType<typeof loadCharacters>,
     history: ChatMessage[],
-    replyCount: number,
+    replies: { characterId: string; responseText: string }[],
 ): void {
+    const uniqueParticipantIds = [...new Set(session.participantIds ?? [])];
+    const soloCharacterGroup = uniqueParticipantIds.length <= 1;
     const lastMessage = history[history.length - 1];
-    const userEventCount = lastMessage?.role === "user" ? 1 : 0;
-    const totalNewEvents = userEventCount + replyCount;
-    if (totalNewEvents <= 0) return;
+    const userMessage = lastMessage?.role === "user" ? lastMessage : undefined;
+    const senderByMessageId = new Map<string, { characterId?: string; senderName?: string }>();
+    if (!soloCharacterGroup) {
+        for (const msg of history) {
+            senderByMessageId.set(msg.id, {
+                characterId: msg.senderCharacterId,
+                senderName: msg.senderName,
+            });
+        }
+    }
 
-    const uniqueParticipantIds = [...new Set(participantIds)];
+    const castNames = chars.map(character => character.name.trim()).filter(Boolean);
     for (const characterId of uniqueParticipantIds) {
         const character = chars.find(c => c.id === characterId);
         if (!character) continue;
-
-        for (let i = 0; i < totalNewEvents; i++) {
-            incrementEventCounter(characterId);
+        const names = [character.name.trim()].filter(Boolean);
+        const otherNames = castNames.filter(name => !names.includes(name));
+        let events = 0;
+        if (userMessage && groupMessageInvolvesCharacter(userMessage, { characterId, names }, {
+            soloCharacterGroup,
+            senderByMessageId,
+            otherNames,
+        })) {
+            events += 1;
         }
+        for (const reply of replies) {
+            if (reply.characterId === characterId) {
+                events += 1;
+                continue;
+            }
+            if (textMentionsCharacter(reply.responseText, names, otherNames)) events += 1;
+        }
+        if (events <= 0) continue;
 
+        for (let i = 0; i < events; i++) incrementEventCounter(characterId);
         maybeRunSummarization(characterId, character.name)
             .catch(err => console.warn("[GroupChat] Memory counter/summarization failed:", err));
     }
@@ -343,13 +385,14 @@ async function buildGroupChatPromptMessages(
         if (!character) return null;
         const memberTimeContext = buildCharacterTimeContext(character.timeZone, now);
         memberTimeContexts[charId] = memberTimeContext;
+        const scheduleClock = clockForCalendarOwner("character", charId, now);
         const dailyWorld = buildDailyWorldMarker(
             charId,
-            formatIsoDate(now),
+            scheduleClock.dateIso,
             (id) => charMap.get(id)?.name ?? id,
         );
         const scheduleSummary = [
-            buildCalendarScheduleMarker("character", charId, getWeekStartIso(now)),
+            buildCalendarScheduleMarker("character", charId, scheduleClock.weekStartIso),
             dailyWorld,
         ].filter(Boolean).join("\n");
         const currentSchedule = getCurrentCalendarScheduleForPrompt("character", charId, now);
@@ -845,7 +888,6 @@ export async function generateGroupChatCompletion(
         regenerationHint: options?.regenerationHint,
     });
     const chars = loadCharacters();
-    const participantIds = session.participantIds || [];
 
     const MAX_TOOL_ROUNDS = 5;
     const meta = { characterName: `群聊:${session.groupName || "群聊"}` };
@@ -1047,6 +1089,9 @@ export async function generateGroupChatCompletion(
     // Parse final output into per-character results
     throwIfAborted(options?.signal);
     const parsed = parseGroupChatResponse(finalRawOutput, nameToId);
+    if (parsed.length === 0 && nameToId.size > 1 && finalRawOutput.trim()) {
+        console.warn("[GroupChat] 多人回复没有说话人标记，已丢弃，避免把整段错记成第一个成员的发言。");
+    }
 
     const finalResults: typeof parsed = [];
     for (const r of parsed) {
@@ -1066,7 +1111,7 @@ export async function generateGroupChatCompletion(
     }
 
     if (!options?.skipMemorySummarization) {
-        scheduleGroupMemorySummarization(participantIds, chars, history, finalResults.length);
+        scheduleGroupMemorySummarization(session, chars, history, finalResults);
     }
 
     return finalResults;

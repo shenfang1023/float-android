@@ -1,5 +1,5 @@
 import type { MemoryEntry } from "./memory-types";
-import { DEFAULT_CORE_MEMORY_PROMPT } from "./memory-types";
+import { DEFAULT_CORE_MEMORY_PROMPT, LEGACY_CORE_MEMORY_PROMPT } from "./memory-types";
 import {
     loadMemoryConfig,
     loadMemoryEntriesByType,
@@ -11,6 +11,12 @@ import {
 } from "./memory-storage";
 import { resolveAuxiliaryApiConfig } from "./settings-storage";
 import { simpleLLMCall } from "./api-helpers";
+import { loadCharacters } from "./character-storage";
+import {
+    CORE_MEMORY_FACT_RULE,
+    formatCharacterCardFacts,
+    stripUngroundedStartAges,
+} from "./core-memory-facts";
 
 const coreBuildingSet = new Set<string>();
 
@@ -74,13 +80,26 @@ export async function runCoreMemoryPipeline(
     if (!formatted) return { success: false, error: "格式化核心记忆数据失败" };
 
     const { eventsText, earliest, latest } = formatted;
-    const promptTemplate = config.coreMemoryPrompt?.trim() || DEFAULT_CORE_MEMORY_PROMPT;
-    const prompt = promptTemplate
+    let promptTemplate = config.coreMemoryPrompt?.trim() || DEFAULT_CORE_MEMORY_PROMPT;
+    if (promptTemplate === LEGACY_CORE_MEMORY_PROMPT.trim()) {
+        promptTemplate = DEFAULT_CORE_MEMORY_PROMPT;
+    }
+    const character = loadCharacters().find((item) => item.id === characterId) ?? null;
+    const cardFacts = formatCharacterCardFacts(character
+        ? { persona: character.persona, personality: character.personality }
+        : null);
+    let prompt = promptTemplate
         .replace(/\{\{char\}\}/gi, characterName)
         .replace(/\{\{earliest\}\}/gi, earliest)
         .replace(/\{\{latest\}\}/gi, latest)
         .replace(/\{\{events\}\}/gi, eventsText)
         .replace(/\{\{longTermMemories\}\}/gi, eventsText);
+    if (/\{\{cardFacts\}\}/i.test(prompt)) {
+        prompt = prompt.replace(/\{\{cardFacts\}\}/gi, cardFacts);
+    } else {
+        prompt += `\n\n人物卡（只用于核对）：\n${cardFacts}`;
+    }
+    prompt += `\n\n${CORE_MEMORY_FACT_RULE}`;
 
     const result = await simpleLLMCall(
         apiConfig,
@@ -95,9 +114,9 @@ export async function runCoreMemoryPipeline(
         return { success: false, error: "核心记忆总结结果疑似被截断，已取消入库，请稍后重试" };
     }
 
-    const summary = result.content.trim();
+    const summary = stripUngroundedStartAges(result.content.trim(), eventsText);
     if (!summary) {
-        return { success: false, error: "核心记忆总结结果为空" };
+        return { success: false, error: "核心记忆把持续时间写成了起始年龄，已拦截，没有入库" };
     }
 
     const now = new Date().toISOString();

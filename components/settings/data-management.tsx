@@ -52,7 +52,8 @@ import {
 } from "@/lib/media-maintenance";
 import { clearStorageCategory, scanStorageSpace, type StorageCategoryId, type StorageCategoryStat } from "@/lib/storage-space";
 import { kvGet, kvSet } from "@/lib/kv-db";
-import { getLastAutoBackupAt } from "@/lib/auto-backup";
+import { getLastAutoBackupAt, maybeRunAutoBackup } from "@/lib/auto-backup";
+import { pickWebBackupDirectory, readWebBackupStatus, type WebBackupStatus } from "@/lib/web-backup-directory";
 import { hasPublicDocumentsAccess, requestDocumentsAccess } from "@/lib/storage-access";
 import { isAndroidBrowser, isIOSBrowser, isNativeApp } from "@/lib/download-utils";
 import type { BackupManifest, DataModuleId, DataSnapshot, ImportResult, ModuleStats } from "@/lib/data-management/types";
@@ -255,6 +256,30 @@ function formatTime(value?: string): string {
   }
 }
 
+function autoBackupDescription(
+  native: boolean,
+  docsAccess: boolean | null,
+  webBackup: WebBackupStatus | null,
+  lastAutoBackup: string | null,
+): string {
+  const last = lastAutoBackup ? `上次：${formatTime(lastAutoBackup)}` : "尚未执行";
+  if (native) {
+    if (docsAccess === false) return "需要「所有文件访问」权限才能写入文档目录——点此打开系统设置开启，回来即自动生效";
+    return `每6小时静默导出到系统「文档」目录，保留最近3份。${last}`;
+  }
+  if (!webBackup) return "正在读取备份设置";
+  if (webBackup.access === "unsupported") return "当前浏览器不能选择备份文件夹，请用本页的手动导出。";
+  if (webBackup.access === "prompt") {
+    const folder = webBackup.directoryName ? `「${webBackup.directoryName}」` : "备份文件夹";
+    return `${folder}需要重新授权，点此再选一次。`;
+  }
+  if (webBackup.access === "granted") {
+    const folder = webBackup.directoryName ? `文件夹「${webBackup.directoryName}」` : "所选文件夹";
+    return `每6小时写入${folder}，保留最近3份。${last}`;
+  }
+  return "点此选择一个文件夹。之后每6小时写入一份备份，保留最近3份。";
+}
+
 type RestartNotice = {
   title: string;
   summary: string;
@@ -292,6 +317,7 @@ export function DataManagement({ onNotice }: DataManagementProps) {
   const [persistSupported, setPersistSupported] = useState(false);
   const [lastAutoBackup, setLastAutoBackup] = useState<string | null>(null);
   const [docsAccess, setDocsAccess] = useState<boolean | null>(null);
+  const [webBackup, setWebBackup] = useState<WebBackupStatus | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [exportExcludeMedia, setExportExcludeMedia] = useState(() => kvGet("data_mgmt_export_exclude_media") === "1");
@@ -333,11 +359,14 @@ export function DataManagement({ onNotice }: DataManagementProps) {
     [pendingImport],
   );
   const reloadStats = async () => {
+    const webStatusPromise = isNativeApp() ? Promise.resolve(null) : readWebBackupStatus();
+    const docsPromise = hasPublicDocumentsAccess();
     const nextSnapshot = await inspectData();
     setSnapshot(nextSnapshot);
     setPersisted(nextSnapshot.storage?.persisted ?? null);
     setLastAutoBackup(getLastAutoBackupAt());
-    setDocsAccess(await hasPublicDocumentsAccess());
+    setDocsAccess(await docsPromise);
+    setWebBackup(await webStatusPromise);
   };
 
   useEffect(() => {
@@ -515,6 +544,26 @@ export function DataManagement({ onNotice }: DataManagementProps) {
     return `已删除 ${result.deletedAssets} 个未引用主题素材，预计释放 ${formatBytes(result.freedBytes)}。`;
   });
 
+  const handleBackupRowClick = () => {
+    if (isNativeApp()) {
+      void requestDocumentsAccess().then(setDocsAccess);
+      return;
+    }
+    void runAction("选择备份文件夹", async () => {
+      try {
+        const next = await pickWebBackupDirectory();
+        setWebBackup(next);
+        if (next.access === "unsupported") return "当前浏览器不能选择备份文件夹，请用手动导出。";
+        if (next.access !== "granted") return "没有获得这个文件夹的写入权限。";
+        await maybeRunAutoBackup();
+        return "已记住备份文件夹。之后每 6 小时写入一份，保留最近 3 份。";
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        throw error;
+      }
+    });
+  };
+
   const handleConfirmRequest = () => {
     if (!confirmRequest) return;
     const request = confirmRequest;
@@ -537,6 +586,11 @@ export function DataManagement({ onNotice }: DataManagementProps) {
     }
     void executeClearSelected(request.moduleIds);
   };
+
+  const nativeShell = isNativeApp();
+  const backupNeedsTap = nativeShell
+    ? docsAccess === false
+    : webBackup !== null && webBackup.access !== "granted";
 
   return (
     <div className="page-menu data-management-menu" style={{ padding: 0 }}>
@@ -573,21 +627,15 @@ export function DataManagement({ onNotice }: DataManagementProps) {
             </span>
           </div>
           <div
-            className={`menu-item data-readonly-item${docsAccess === false ? " data-permission-item" : ""}`}
-            onClick={docsAccess === false
-              ? () => void requestDocumentsAccess().then(setDocsAccess)
-              : undefined}
-            role={docsAccess === false ? "button" : undefined}
+            className={`menu-item data-readonly-item${backupNeedsTap ? " data-permission-item" : ""}`}
+            onClick={backupNeedsTap ? handleBackupRowClick : undefined}
+            role={backupNeedsTap ? "button" : undefined}
           >
-            <DataSettingsIcon icon={History} color={docsAccess === false ? BINDING_ACCENTS.regex : BINDING_ACCENTS.api} />
+            <DataSettingsIcon icon={History} color={backupNeedsTap ? BINDING_ACCENTS.regex : BINDING_ACCENTS.api} />
             <div className="menu-label-group">
               <span className="menu-label">自动备份</span>
               <span className="menu-desc">
-                {docsAccess === false
-                  ? "需要「所有文件访问」权限才能写入文档目录——点此打开系统设置开启，回来即自动生效"
-                  : isNativeApp()
-                    ? `每6小时静默导出到系统「文档」目录，保留最近3份。${lastAutoBackup ? `上次：${formatTime(lastAutoBackup)}` : "尚未执行"}`
-                    : "仅安装包生效：每6小时静默导出到系统「文档」目录"}
+                {autoBackupDescription(nativeShell, docsAccess, webBackup, lastAutoBackup)}
               </span>
             </div>
           </div>

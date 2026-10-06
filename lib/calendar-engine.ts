@@ -4,6 +4,7 @@ import type { UserIdentity } from "@/components/settings/user-identity";
 import type { AssemblerInput, LLMMessage } from "./llm-prompt-assembler";
 import type { CalendarOwnerType, CalendarScheduleItem } from "./calendar-types";
 import { loadCharacters } from "./character-storage";
+import { formatScheduleClockRule } from "./character-time";
 import {
   loadBindingConfig,
   loadApiConfigs,
@@ -59,13 +60,19 @@ function buildSyntheticUserCharacter(identity: UserIdentity | null): Character {
   };
 }
 
-function buildCalendarTriggerInstruction(ownerName: string, weekDates: string[]): string {
+function clockRuleForCharacter(ownerId: string): string {
+  return formatScheduleClockRule(loadCharacters().find(character => character.id === ownerId)?.timeZone);
+}
+
+function buildCalendarTriggerInstruction(ownerName: string, weekDates: string[], clockRule: string): string {
   return [
     `请为${ownerName}生成 ${weekDates[0]} 到 ${weekDates[6]} 这一周的日程安排。`,
     "请参考已有日程，生成这一周的完整日程安排。",
     "每行一条，格式：YYYY-MM-DD|周几|开始时间|结束时间|地点|emoji|事项。emoji 段填一个最贴合该事项的表情符号。",
     "事项用客观简洁的记录风格写行为事实（≤30字，像日志不像散文）。正确示例：「在便利店买了三明治当午饭」；错误示例：「阳光洒进房间，他陷入了长久的沉思」。",
     "作息时间不受限制（早起、夜跑、通宵都可以安排），但每一天最多 5 条日程，宁缺毋滥。",
+    clockRule,
+    "日期用这一周里给出的公历日期。HH:MM 按时间基准的时区书写。",
   ].join("\n");
 }
 
@@ -74,6 +81,7 @@ function buildDayTriggerInstruction(
   ownerName: string,
   date: string,
   dayItems: CalendarScheduleItem[],
+  clockRule: string,
   feedback?: string,
 ): string {
   const existing = dayItems.length > 0
@@ -89,11 +97,13 @@ function buildDayTriggerInstruction(
     "事项用客观简洁的记录风格写行为事实（≤30字，像日志不像散文）。",
     "每一天最多 5 条日程，宁缺毋滥。",
     `要清空当天所有安排，改为输出一行：${date}|CLEAR`,
+    clockRule,
+    `时间基准里的当地现在只用来对齐作息。输出日期必须是 ${date}。`,
   ].join("\n");
 }
 
 /** 整周带反馈调整指令：不预清旧日程（模型要知道改了什么），只输出受影响日期 */
-function buildWeekAdjustInstruction(ownerName: string, weekDates: string[], feedback: string): string {
+function buildWeekAdjustInstruction(ownerName: string, weekDates: string[], feedback: string, clockRule: string): string {
   return [
     `请按用户反馈调整${ownerName} ${weekDates[0]} 到 ${weekDates[6]} 这一周的日程。`,
     `用户反馈：「${feedback.trim()}」`,
@@ -102,6 +112,8 @@ function buildWeekAdjustInstruction(ownerName: string, weekDates: string[], feed
     "每行一条，格式：YYYY-MM-DD|周几|开始时间|结束时间|地点|emoji|事项。",
     "事项用客观简洁的记录风格写行为事实（≤30字，像日志不像散文）。每一天最多 5 条，宁缺毋滥。",
     "要清空某天的全部 AI 安排，输出一行：YYYY-MM-DD|CLEAR",
+    clockRule,
+    "日期仍用这一周的公历日期。HH:MM 按时间基准的时区书写。",
   ].join("\n");
 }
 
@@ -289,9 +301,10 @@ export async function generateWeeklyCalendarSchedule(
   try {
     const resolved = await resolveCalendarAssemblerInput(ownerType, ownerId, weekStart);
     const weekDates = getWeekDates(weekStart);
+    const clockRule = clockRuleForCharacter(ownerId);
     const triggerInstruction = feedback
-      ? buildWeekAdjustInstruction(resolved.ownerName, weekDates, feedback)
-      : buildCalendarTriggerInstruction(resolved.ownerName, weekDates);
+      ? buildWeekAdjustInstruction(resolved.ownerName, weekDates, feedback, clockRule)
+      : buildCalendarTriggerInstruction(resolved.ownerName, weekDates, clockRule);
 
     const messages: LLMMessage[] = [
       ...resolved.llmMessages,
@@ -349,7 +362,13 @@ export async function generateDayCalendarSchedule(
     const resolved = await resolveCalendarAssemblerInput(ownerType, ownerId, weekStart);
     const dayItems = (loadCalendarWeekPlan(ownerType, ownerId, weekStart)?.items ?? [])
       .filter(item => item.date === date && item.source !== "manual");
-    const triggerInstruction = buildDayTriggerInstruction(resolved.ownerName, date, dayItems, feedback);
+    const triggerInstruction = buildDayTriggerInstruction(
+      resolved.ownerName,
+      date,
+      dayItems,
+      clockRuleForCharacter(ownerId),
+      feedback,
+    );
 
     const rawText = await sendLLMRequest(
       resolved.apiConfig,
@@ -387,7 +406,11 @@ export async function previewCalendarPromptPayload(
   }
   const resolved = await resolveCalendarAssemblerInput(ownerType, ownerId, weekStart);
   const weekDates = getWeekDates(weekStart);
-  const triggerInstruction = buildCalendarTriggerInstruction(resolved.ownerName, weekDates);
+  const triggerInstruction = buildCalendarTriggerInstruction(
+    resolved.ownerName,
+    weekDates,
+    clockRuleForCharacter(ownerId),
+  );
 
   const messages: LLMMessage[] = [
     ...resolved.llmMessages,

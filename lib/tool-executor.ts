@@ -30,6 +30,7 @@ import { runConsolidation } from "./memory-consolidation";
 import type { MemoryEntry } from "./memory-types";
 import { loadCharacters } from "./character-storage";
 import {
+    clockForCalendarOwner,
     deleteCalendarScheduleItem,
     loadCalendarWeekPlan,
     loadOwnerCalendarPlans,
@@ -1759,7 +1760,8 @@ async function executeMemoryManageTool(call: ToolCall, context?: ToolExecutionCo
 }
 
 function executeCalendarListTool(args: Record<string, unknown>, characterId: string): ToolResult {
-    const date = normalizeCalendarDate(args.date ?? args.weekDate ?? args.week_date, { fallbackToToday: true });
+    const explicit = normalizeCalendarDate(args.date ?? args.weekDate ?? args.week_date, { fallbackToToday: false });
+    const date = explicit || clockForCalendarOwner("character", characterId).dateIso;
     if (!date) return calendarToolFailure("查看日程", "日期格式无效，请使用 YYYY-MM-DD", "日期格式无效");
     const weekStart = getWeekStartIso(parseIsoDate(date));
     const plan = loadCalendarWeekPlan("character", characterId, weekStart);

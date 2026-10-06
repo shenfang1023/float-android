@@ -18,8 +18,8 @@ import {
 } from "./settings-storage";
 import { simpleLLMCall } from "./api-helpers";
 import type { ApiConfig, PresetConfig, RegexConfig, WorldBookConfig } from "./settings-types";
-import { buildCalendarScheduleMarker } from "./calendar-storage";
-import { getWeekStartIso } from "./calendar-utils";
+import { buildCalendarScheduleMarker, clockForCalendarOwner } from "./calendar-storage";
+
 import {
   executeCoCreateToolCalls,
   finalizeCoCreateToolArtifacts,
@@ -513,7 +513,7 @@ export async function generateCoCreateReply(
     appTags,
     longTermMemories: memories ? formatLongTermMemories(memories) : "",
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
-    scheduleSummary: buildCalendarScheduleMarker("character", runtime.character.id, getWeekStartIso(new Date())),
+    scheduleSummary: buildCalendarScheduleMarker("character", runtime.character.id, clockForCalendarOwner("character", runtime.character.id).weekStartIso),
     worldBookActivationContext: cocreateActivationContext,
     recentBlocks,
     unifiedRecentItems,
@@ -795,7 +795,7 @@ export async function previewCoCreatePromptPayload(
     appTags,
     longTermMemories: memories ? formatLongTermMemories(memories) : "",
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
-    scheduleSummary: buildCalendarScheduleMarker("character", runtime.character.id, getWeekStartIso(new Date())),
+    scheduleSummary: buildCalendarScheduleMarker("character", runtime.character.id, clockForCalendarOwner("character", runtime.character.id).weekStartIso),
     worldBookActivationContext: cocreateActivationContext,
     recentBlocks,
     unifiedRecentItems,

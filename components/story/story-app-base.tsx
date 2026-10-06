@@ -621,7 +621,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
     : [], [floatingChatSession, floatingChatVersion]);
   const floatingChatContext = useMemo(() => floatingChatMessages.map((message) => {
     const name = message.role === "user" ? (userIdentity?.name || "用户") : (currentCharacter?.name || "角色");
-    const text = message.content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const rawContent = typeof message.content === "string" ? message.content : "";
+    const text = rawContent.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     return `${new Date(message.createdAt).toLocaleString()} ${name}：${text}`;
   }).join("\n"), [currentCharacter?.name, floatingChatMessages, userIdentity?.name]);
   const isGenerating = Boolean(activeSessionId) && generatingSessionIds.has(activeSessionId);
@@ -2233,7 +2234,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
               {floatingChatMessages.length ? floatingChatMessages.map((message) => (
                 <div key={message.id} data-role={message.role}>
                   <small>{message.role === "user" ? (userIdentity?.name || "我") : (message.senderName || currentCharacter.name)} · {new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small>
-                  <p>{message.content || message.mediaData?.label || (message.mediaType ? `[${message.mediaType}]` : "")}</p>
+                  <p>{(typeof message.content === "string" ? message.content : "") || message.mediaData?.label || (message.mediaType ? `[${message.mediaType}]` : "")}</p>
                 </div>
               )) : <p className="story-mini-phone-empty">{activeGroup && !floatingChatSession ? "若没有群聊建议先建一个群聊" : "还没有线上聊天记录"}</p>}
               {floatingChatGenerating ? <div className="story-mini-phone-typing"><i /><i /><i /></div> : null}

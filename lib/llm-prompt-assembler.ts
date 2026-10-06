@@ -15,6 +15,7 @@ import { stripStateAndInnerForPrompt } from "./prompt-sanitizer";
 import { formatPromptTimestamp, getPromptTimestampOptionsForTimeContext, resolvePromptTimeAware, type PromptTimestampOptions } from "./prompt-time";
 import { formatCharacterRelationsForPrompt } from "./character-world-storage";
 import { buildPersonaDriftOverlay } from "./persona-state";
+import { loadMemoryConfig } from "./memory-storage";
 import { buildCharacterTimeContext, buildGroupTimeContext, type CharacterTimeContext } from "./character-time";
 import { formatShoppingPaymentRequestHistory } from "./shopping-payment-request";
 import { buildGroupAdminBracketText } from "./group-admin";
@@ -488,8 +489,10 @@ function getMarkerContent(
     switch (identifier) {
         case "charDescription": {
             const base = `You are ${character.name}.\n${character.persona}`;
-            // 人格漂移覆盖层：反思产生的性格变化跟随人设走，不依赖预设是否放了专用宏。
-            const drift = buildPersonaDriftOverlay(character.id);
+            // 性格覆盖层默认不注入。打开「自动性格漂移」后，才把反思写出的变化跟在人设后面。
+            const drift = loadMemoryConfig().autoPersonaDriftEnabled
+                ? buildPersonaDriftOverlay(character.id)
+                : "";
             return drift ? `${base}\n${drift}` : base;
         }
         case "charPersonality":

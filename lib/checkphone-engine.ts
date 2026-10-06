@@ -62,8 +62,8 @@ import {
   getVisibleMomentCommentsForCharacter,
   getVisibleMomentLikesForCharacter,
 } from "./character-world-storage";
-import { buildCalendarScheduleMarker } from "./calendar-storage";
-import { getWeekStartIso } from "./calendar-utils";
+import { buildCalendarScheduleMarker, clockForCalendarOwner } from "./calendar-storage";
+
 import {
   loadApiConfigs,
   loadBindingConfig,
@@ -144,7 +144,7 @@ async function buildCheckPhoneManifestMessages(
     userIdentity,
     appId: "checkphone",
     appTags: getCheckPhonePromptTags("manifest"),
-    scheduleSummary: buildCalendarScheduleMarker("character", characterId, getWeekStartIso(new Date())),
+    scheduleSummary: buildCalendarScheduleMarker("character", characterId, clockForCalendarOwner("character", characterId).weekStartIso),
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
     longTermMemories: memories ? formatLongTermMemories(memories) : "",
     worldBookActivationContext: wbActivationContext,
@@ -1206,7 +1206,7 @@ async function buildCheckPhoneAppMessages(
     userIdentity,
     appId: "checkphone",
     appTags,
-    scheduleSummary: buildCalendarScheduleMarker("character", characterId, getWeekStartIso(new Date())),
+    scheduleSummary: buildCalendarScheduleMarker("character", characterId, clockForCalendarOwner("character", characterId).weekStartIso),
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
     longTermMemories: memories ? formatLongTermMemories(memories) : "",
     worldBookActivationContext: wbActivationContext,

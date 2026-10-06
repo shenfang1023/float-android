@@ -1213,8 +1213,9 @@
 
         /* === 富文本排版 (Typography Aesthetic) === */
         .story-richtext {
+          position: relative;
           font-size: calc(14px*var(--app-text-scale,1));
-          overflow-x: hidden;
+          overflow: hidden;
           overflow-wrap: anywhere;
           text-align: justify;
         }

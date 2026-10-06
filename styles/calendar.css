@@ -734,6 +734,21 @@
   opacity: 0.65;
 }
 
+.calendar-tl-zone {
+  font-style: normal;
+  font-size: calc(10px * var(--app-text-scale, 1));
+  font-weight: 600;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 4px;
+}
+
+.calendar-tl-day-head[data-today="true"] .calendar-tl-zone {
+  color: var(--c-calendar-today);
+}
+
 .calendar-now-line {
   position: absolute;
   left: 0;

@@ -23,6 +23,7 @@ import { createDefaultScheduleDraft, generateDayCalendarSchedule, generateWeekly
 import { generateDailyWorld } from "@/lib/daily-world-engine";
 import { loadAllDailyWorldPlans } from "@/lib/daily-world-storage";
 import { loadCharacters } from "@/lib/character-storage";
+import { getZonedClock, timeZoneCityLabel } from "@/lib/character-time";
 import { isNpcCharacter } from "@/lib/character-tier";
 import { loadChatSessions } from "@/lib/chat-storage";
 import { resolveUserIdentity } from "@/lib/settings-storage";
@@ -136,11 +137,15 @@ export function PhoneCalendarApp({
   onClose: () => void;
   onNotice?: (text: string) => void;
 }) {
-  const todayIso = formatIsoDate(new Date());
+  const [clockNow, setClockNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(new Date()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const [owners, setOwners] = useState<OwnerOption[]>(() => buildOwnerOptions());
   const [selectedKey, setSelectedKey] = useState<string>(() => owners[0]?.key ?? "user:me");
   const [view, setView] = useState<"month" | "detail">("month");
-  const [selectedDate, setSelectedDate] = useState<string>(todayIso);
+  const [selectedDate, setSelectedDate] = useState<string>(() => formatIsoDate(new Date()));
   const [detailKey, setDetailKey] = useState(0);
   const [ownerPlans, setOwnerPlans] = useState<CalendarWeekPlan[]>([]);
   const [config, setConfig] = useState(() => loadCalendarConfig());
@@ -208,6 +213,15 @@ export function PhoneCalendarApp({
     () => owners.find(owner => owner.key === selectedKey) ?? owners[0] ?? null,
     [owners, selectedKey],
   );
+  const ownerTimeZone = selectedOwner?.ownerType === "character"
+    ? loadCharacters().find(character => character.id === selectedOwner.ownerId)?.timeZone
+    : undefined;
+  const ownerClock = useMemo(
+    () => getZonedClock(ownerTimeZone, clockNow),
+    [ownerTimeZone, clockNow],
+  );
+  const todayIso = ownerClock.dateIso;
+  const zoneCity = timeZoneCityLabel(ownerTimeZone);
   const weekStart = useMemo(() => getWeekStartIso(parseIsoDate(selectedDate)), [selectedDate]);
   const [worldPlans, setWorldPlans] = useState(() => loadAllDailyWorldPlans());
   const worldByDate = useMemo(() => new Map(worldPlans.map(p => [p.date, p])), [worldPlans]);
@@ -584,7 +598,10 @@ export function PhoneCalendarApp({
           onClick={() => {
             setFabMenuOpen(false);
             setSelectedKey(owner.key);
-            setSelectedDate(todayIso);
+            const timeZone = owner.ownerType === "character"
+              ? loadCharacters().find(character => character.id === owner.ownerId)?.timeZone
+              : null;
+            setSelectedDate(getZonedClock(timeZone).dateIso);
           }}
         >
           <Avatar src={owner.avatar || undefined} name={owner.name} size="md" />
@@ -607,6 +624,8 @@ export function PhoneCalendarApp({
         {view === "month" ? (
           <CalendarMonthPage
             todayIso={todayIso}
+            zoneCity={zoneCity}
+            localTimeLabel={zoneCity ? ownerClock.label : ""}
             itemsByDate={itemsByDate}
             cycleMap={cycleMap}
             ownerStrip={ownerStrip}
@@ -619,6 +638,8 @@ export function PhoneCalendarApp({
             key={detailKey}
             initialDate={selectedDate}
             todayIso={todayIso}
+            timeZone={ownerTimeZone}
+            zoneCity={zoneCity}
             itemsByDate={itemsByDate}
             cycleMap={cycleMap}
             cyclePanel={cyclePanel}

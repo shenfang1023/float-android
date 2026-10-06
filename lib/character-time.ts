@@ -59,6 +59,7 @@ function getDateParts(date: Date, timeZone: string): DateParts {
     minute: "2-digit",
     second: "2-digit",
     hourCycle: "h23",
+    hour12: false,
   });
   const values: Partial<DateParts> = {};
   for (const part of formatter.formatToParts(date)) {
@@ -73,7 +74,7 @@ function getDateParts(date: Date, timeZone: string): DateParts {
       values[part.type] = part.value;
     }
   }
-  return {
+  const parts: DateParts = {
     year: values.year || "0000",
     month: values.month || "01",
     day: values.day || "01",
@@ -81,6 +82,105 @@ function getDateParts(date: Date, timeZone: string): DateParts {
     minute: values.minute || "00",
     second: values.second || "00",
   };
+  // Some engines report midnight as hour 24 on the previous civil date.
+  if (parts.hour !== "24") return parts;
+  const rolled = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)));
+  rolled.setUTCDate(rolled.getUTCDate() + 1);
+  return {
+    ...parts,
+    year: String(rolled.getUTCFullYear()),
+    month: String(rolled.getUTCMonth() + 1).padStart(2, "0"),
+    day: String(rolled.getUTCDate()).padStart(2, "0"),
+    hour: "00",
+  };
+}
+
+export type ZonedClock = {
+  timeZone: string;
+  dateIso: string;
+  minutes: number;
+  weekStartIso: string;
+  /** HH:MM in the zone */
+  label: string;
+};
+
+/** Monday-start civil week of a YYYY-MM-DD. Independent of the phone timezone. */
+export function weekStartFromIsoDate(iso: string): string {
+  const match = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return iso;
+  const utc = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  const day = utc.getUTCDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  utc.setUTCDate(utc.getUTCDate() + diff);
+  const year = utc.getUTCFullYear();
+  const month = String(utc.getUTCMonth() + 1).padStart(2, "0");
+  const date = String(utc.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${date}`;
+}
+
+/** Wall clock in `timeZone`. Empty or invalid zones follow the phone. */
+export function getZonedClock(timeZone: string | null | undefined, now = new Date()): ZonedClock {
+  const zone = normalizeTimeZone(timeZone) || getSystemTimeZone();
+  const parts = getDateParts(now, zone);
+  const hour = Number(parts.hour);
+  const minute = Number(parts.minute);
+  const dateIso = `${parts.year}-${parts.month}-${parts.day}`;
+  return {
+    timeZone: zone,
+    dateIso,
+    minutes: hour * 60 + minute,
+    weekStartIso: weekStartFromIsoDate(dateIso),
+    label: `${String(hour).padStart(2, "0")}:${parts.minute}`,
+  };
+}
+
+/**
+ * Epoch of a civil YYYY-MM-DD plus minutes-from-midnight in `timeZone`.
+ * Do not use Date#setHours for this — that writes the phone's wall clock.
+ */
+export function zonedDateTimeToEpoch(dateIso: string, minutes: number, timeZone: string): number {
+  const zone = normalizeTimeZone(timeZone) || getSystemTimeZone();
+  const match = dateIso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match || !Number.isFinite(minutes)) return NaN;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Math.min(23, Math.max(0, Math.floor(minutes / 60)));
+  const minute = Math.min(59, Math.max(0, minutes % 60));
+  const wanted = Date.UTC(year, month - 1, day, hour, minute, 0);
+  let guess = wanted;
+  for (let i = 0; i < 4; i++) {
+    const parts = getDateParts(new Date(guess), zone);
+    const got = Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+      0,
+    );
+    const delta = wanted - got;
+    if (delta === 0) break;
+    guess += delta;
+  }
+  return guess;
+}
+
+/** Short city for a zone that differs from the phone. Empty when it follows the phone. */
+export function timeZoneCityLabel(timeZone: string | null | undefined): string {
+  const named = normalizeTimeZone(timeZone);
+  if (!named || named === getSystemTimeZone()) return "";
+  return named.split("/").pop()?.replace(/_/g, " ") || named;
+}
+
+/** Locks schedule HH:MM to the character zone (or the phone zone when none is set). */
+export function formatScheduleClockRule(timeZone: string | null | undefined, now = new Date()): string {
+  const named = normalizeTimeZone(timeZone);
+  const clock = getZonedClock(named, now);
+  if (!named || named === getSystemTimeZone()) {
+    return `时间基准：${clock.timeZone}，当地现在是 ${clock.dateIso} ${clock.label}。日程里的日期和 HH:MM 按这个时区书写，不要另换成别的时区。`;
+  }
+  return `时间基准：角色时区 ${named}，按这个时区的钟点书写，不要改成手机时区 ${getSystemTimeZone()}。角色当地现在是 ${clock.dateIso} ${clock.label}。日程里的日期和 HH:MM 必须是 ${named} 的本地钟点。`;
 }
 
 export function formatZonedPromptTimestamp(date: Date, timeZone: string, includeTimeZone = false): string {

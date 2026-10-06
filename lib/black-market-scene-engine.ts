@@ -1,8 +1,8 @@
 import { loadCharacters } from "./character-storage";
 import type { Character } from "./character-types";
 import type { ChatMessage } from "./chat-storage";
-import { buildCalendarScheduleMarker } from "./calendar-storage";
-import { getWeekStartIso } from "./calendar-utils";
+import { buildCalendarScheduleMarker, clockForCalendarOwner } from "./calendar-storage";
+
 import { ChatEngineError, sendLLMRequest } from "./chat-engine";
 import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { MacroEngine, postProcessTrim } from "./macro-engine";
@@ -145,7 +145,7 @@ async function buildScenePromptMessages(session: BlackMarketSceneSession, templa
     userIdentity,
     appId: BLACK_MARKET_PROMPT_APP_ID,
     appTags: BLACK_MARKET_PROMPT_TAGS,
-    scheduleSummary: buildCalendarScheduleMarker("character", session.characterId, getWeekStartIso(new Date())),
+    scheduleSummary: buildCalendarScheduleMarker("character", session.characterId, clockForCalendarOwner("character", session.characterId).weekStartIso),
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
     longTermMemories: memories ? formatLongTermMemories(memories) : "",
     worldBookActivationContext: wbActivationContext,

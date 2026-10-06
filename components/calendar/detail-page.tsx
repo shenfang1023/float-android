@@ -5,6 +5,7 @@ import { Columns2, Settings2 } from "lucide-react";
 import type { CalendarScheduleItem, DailyWorldPlan } from "@/lib/calendar-types";
 import type { MenstrualDayState } from "@/lib/menstrual-storage";
 import { formatIsoDate, parseIsoDate, timeToMinutes } from "@/lib/calendar-utils";
+import { getZonedClock } from "@/lib/character-time";
 import { getLunarInfoByIso } from "@/lib/lunar";
 
 const WEEKDAY_CN = ["日", "一", "二", "三", "四", "五", "六"];
@@ -81,6 +82,8 @@ function layoutDayEvents(items: CalendarScheduleItem[]): PositionedEvent[] {
 export function CalendarDetailPage({
   initialDate,
   todayIso,
+  timeZone,
+  zoneCity,
   itemsByDate,
   cycleMap,
   cyclePanel,
@@ -96,6 +99,10 @@ export function CalendarDetailPage({
 }: {
   initialDate: string;
   todayIso: string;
+  /** Selected character's IANA zone. Empty follows the phone clock. */
+  timeZone?: string | null;
+  /** Short city shown on today's column when the zone differs from the phone. */
+  zoneCity?: string;
   itemsByDate: Map<string, CalendarScheduleItem[]>;
   cycleMap: Map<string, MenstrualDayState> | null;
   /** 经期打卡行（仅用户视图传入），渲染在周条下方 */
@@ -295,18 +302,14 @@ export function CalendarDetailPage({
     }
   };
 
-  // 当前时间红线（每分钟刷新）
-  const [nowMinutes, setNowMinutes] = useState(() => {
-    const now = new Date();
-    return now.getHours() * 60 + now.getMinutes();
-  });
+  // 当前时间红线：跟选中角色的时区，每分钟刷新
+  const [nowMinutes, setNowMinutes] = useState(() => getZonedClock(timeZone).minutes);
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      const now = new Date();
-      setNowMinutes(now.getHours() * 60 + now.getMinutes());
-    }, 60_000);
+    const tick = () => setNowMinutes(getZonedClock(timeZone).minutes);
+    tick();
+    const timer = window.setInterval(tick, 60_000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [timeZone]);
   const nowTop = (nowMinutes / 60) * HOUR_H;
   const nowLabel = `${String(Math.floor(nowMinutes / 60)).padStart(2, "0")}:${String(nowMinutes % 60).padStart(2, "0")}`;
 
@@ -391,7 +394,12 @@ export function CalendarDetailPage({
             const d = parseIsoDate(iso);
             const lunar = getLunarInfoByIso(iso);
             return (
-              <div key={iso} className="calendar-tl-day-head" data-today={iso === todayIso ? "true" : undefined}>
+              <div
+                key={iso}
+                className="calendar-tl-day-head"
+                data-today={iso === todayIso ? "true" : undefined}
+                title={iso === todayIso && timeZone ? timeZone : undefined}
+              >
                 {daysPerPage >= 5 ? (
                   <>
                     <b>{d.getDate()}日</b>
@@ -403,6 +411,7 @@ export function CalendarDetailPage({
                     <span>{lunar ? `${lunar.monthLabel}${lunar.isFirstDay ? "" : lunar.dayLabel}` : ""}</span>
                   </>
                 )}
+                {iso === todayIso && zoneCity ? <em className="calendar-tl-zone">{zoneCity}</em> : null}
                 {(() => {
                   const world = worldByDate?.get(iso);
                   if (!world) return null;
@@ -441,7 +450,7 @@ export function CalendarDetailPage({
             {Array.from({ length: 24 }, (_, h) => (
               <span key={h}>{String(h).padStart(2, "0")}:00</span>
             ))}
-            <i className="calendar-now-badge" style={{ top: `${nowTop}px` }}>{nowLabel}</i>
+            <i className="calendar-now-badge" style={{ top: `${nowTop}px` }} title={timeZone || undefined}>{nowLabel}</i>
           </div>
           <div
             className="calendar-tl-hscroll hide-scrollbar"

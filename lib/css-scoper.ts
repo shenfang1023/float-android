@@ -156,6 +156,36 @@ function scopeSingleSelector(sel: string, scope: string): string {
   return scope + " " + sel;
 }
 
+/**
+ * Generated card CSS must not pin itself to the phone viewport.
+ * `background-position` is left untouched.
+ */
+export function anchorGeneratedCss(css: string): string {
+  if (!css) return css;
+  return css.replace(/(^|[^-\w])position\s*:\s*fixed\b/gi, "$1position:absolute");
+}
+
+/**
+ * Scope a model-written stylesheet onto one bubble, and stop it importing
+ * or breaking out of the `<style>` tag it will be injected into.
+ */
+export function scopeGeneratedCss(raw: string, scopeSelector: string): string {
+  if (!raw.trim()) return "";
+  const { css } = extractCssImports(raw);
+  const scoped = anchorGeneratedCss(scopeSessionCSS(css, scopeSelector));
+  return scoped.replace(/<\/style/gi, "<\\/style");
+}
+
+/**
+ * A leading fragment that would restyle the host page or cover it.
+ * A style-only card stays inline: its selectors are scoped onto the bubble.
+ */
+export function isHostDocumentHtml(strippedWithoutCode: string): boolean {
+  if (!/^\s*</.test(strippedWithoutCode)) return false;
+  return /<(?:script|html|body)\b|<!doctype\b/i.test(strippedWithoutCode)
+    || /(?:^|[^-\w])position\s*:\s*fixed\b/i.test(strippedWithoutCode);
+}
+
 function findMatchingBrace(text: string, openPos: number): number {
   let depth = 0;
   for (let i = openPos; i < text.length; i++) {

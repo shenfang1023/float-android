@@ -429,7 +429,7 @@ const MEMORY_MANAGE_SUBTOOLS: InternalToolDefinition[] = [
     },
     {
         name: "整理记忆",
-        description: "立即沉淀近期记忆：生成跨记忆的洞察（反思）与可能的性格变化。等价于空闲时自动整理的手动触发版。",
+        description: "立即沉淀近期记忆：只生成有两条以上证据、而且不是复述的新洞察。性格变化默认不写，除非用户打开了自动性格漂移。",
         parameterSchema: "{}",
     },
 ];
@@ -444,7 +444,7 @@ const MEMORY_MANAGE_USAGE_GUIDE = [
     "",
     "动作：整理记忆",
     "参数：无",
-    "说明：把近期零散经历沉淀成洞察，偶尔会带来性格层面的细微变化（有证据链可查）。",
+    "说明：把近期零散经历沉淀成新的洞察。不要指望它改性格；性格变化默认关闭。",
     "",
     "使用建议：当对话涉及到过去但你记不清时先检索记忆再回答；不要滥用整理记忆——它像真人的'放空回味'，一天一两次就够了。",
 ].join("\n");
@@ -1126,7 +1126,7 @@ const BUILTIN_INTERNAL_CAPABILITIES: InternalCapabilityConfig[] = [
     {
         id: MEMORY_MANAGE_CAPABILITY_ID,
         name: "记忆管理",
-        description: "主动检索自己的长期记忆（语义×时间×重要性），或立即沉淀近期记忆生成反思与性格变化。",
+        description: "主动检索自己的长期记忆（语义×时间×重要性），或立即沉淀近期记忆生成有证据的新洞察。性格变化默认关闭。",
         enabled: true,
         mode: "auto",
         createdAt: 0,

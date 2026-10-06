@@ -30,7 +30,8 @@ tools/weixin-local-assistant/config.txt
 /public/models/world-builder/
 core.*
 
-# Android signing material — never commit
+# Android release signing — never commit. The public debug keystore is the exception.
 android/keystore.properties
 *.keystore
+!android/app/debug.keystore
 *.jks
